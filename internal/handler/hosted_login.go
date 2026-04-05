@@ -16,14 +16,14 @@ func generateCSRFToken() string {
 	return hex.EncodeToString(b)
 }
 
-func setCSRFCookie(w http.ResponseWriter, token string) {
+func setCSRFCookie(w http.ResponseWriter, token string, secure bool) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     "__csrf",
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
-		Secure:   true,
+		Secure:   secure,
 	})
 }
 
@@ -70,7 +70,7 @@ func (h *Handler) handleHostedLoginPage(w http.ResponseWriter, r *http.Request) 
 	}
 
 	csrfToken := generateCSRFToken()
-	setCSRFCookie(w, csrfToken)
+	setCSRFCookie(w, csrfToken, !h.cfg.TLSDisabled)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// %[1]s = redirectURI, %[2]s = errorHTML, %[3]s = ssoLink, %[4]s = csrfToken,
