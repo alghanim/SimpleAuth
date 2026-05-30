@@ -16,8 +16,10 @@ data/
 .vscode/
 *.swp
 
-# Node (UI build)
-ui/node_modules/
+# Node (UI build + SDK)
+node_modules/
+package-lock.json
+sdk/js/dist/
 
 # Config (auto-generated on first run)
 simpleauth.yaml

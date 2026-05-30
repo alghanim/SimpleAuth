@@ -54,6 +54,17 @@ public class SimpleAuthOptions
 
     /// <summary>Whether to validate SSL certificates</summary>
     public bool ValidateSsl { get; set; } = true;
+
+    /// <summary>
+    /// If set, VerifyAsync requires the token's <c>iss</c> claim to equal this
+    /// value. Leave null/empty to skip the issuer check. Note: direct
+    /// login/refresh tokens use iss="simpleauth"; OIDC code-flow tokens use the
+    /// realm URL.
+    /// </summary>
+    public string? ExpectedIssuer { get; set; }
+
+    /// <summary>If set, VerifyAsync requires this value in the <c>aud</c> claim.</summary>
+    public string? Audience { get; set; }
 }
 
 public class TokenResponse

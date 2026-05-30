@@ -54,8 +54,8 @@ source of truth for what is currently open vs. fixed.
 | M8 | Security headers only on admin UI, not login/API responses | LOW | FIXED | 2026-05-30 |
 | M9 | Reflected XSS via unescaped `error`/`state`/`nonce`/`scope` on login pages | MEDIUM | FIXED | 2026-05-30 |
 | S1 | Python SDK was unimplemented (README/examples referenced missing code) | MEDIUM | FIXED | 2026-05-30 |
-| S2 | JS/.NET SDK `iss` check hardcoded to base URL (always fails login tokens) | MEDIUM | OPEN | |
-| S3 | Go SDK accepts refresh tokens as access tokens; skips `exp` when absent | MEDIUM | OPEN | |
+| S2 | JS/.NET SDK `iss` check hardcoded to base URL (always fails login tokens) | MEDIUM | FIXED | 2026-05-30 |
+| S3 | Go SDK accepts refresh tokens as access tokens; skips `exp` when absent | MEDIUM | FIXED | 2026-05-30 |
 | I1 | Single static admin key = entire authz model; actions audited as "admin" | INFO | WONTFIX | by design (documented) |
 | I2 | No tests for `internal/auth` / `internal/config` | INFO | PARTIAL | 2026-05-30 (added auth + crypto + PKCE + consume tests) |
 
@@ -281,9 +281,27 @@ the diff scoped to security.
   (but stored separately from) the database. (H4)
 
 ### Still open (recommended next pass)
-- **S2** (JS/.NET SDK issuer validation) and **S3** (Go SDK accepts refresh tokens,
-  skips absent `exp`) — client-side hardening.
 - **I2** remainder — LDAP escaping + config tests + Kerberos verify fixture.
 - Not yet done: per-admin attribution (I1, by design), refresh-token/OIDC-code
   pruning, and `X-Forwarded-Proto` trusted-proxy gating in `oidcBaseURL`.
+
+---
+
+## Remediation Log — Follow-up (2026-05-30): SDK hardening + docs
+
+| ID | Files | Approach |
+|----|-------|----------|
+| S2 | `sdk/js/index.ts`, `sdk/dotnet/{SimpleAuthClient,SimpleAuthUser}.cs` | Issuer check is now opt-in (`expectedIssuer`/`ExpectedIssuer`, default off) instead of a hardcoded base-URL compare that rejected every login token; `exp` is mandatory (fail closed); refresh tokens (carrying `family_id`) are rejected; optional audience check added. |
+| S3 | `sdk/go/simpleauth.go` | `Verify` now enforces `exp` (fail closed when absent), rejects refresh tokens, and adds optional `ExpectedIssuer`/`Audience` (string-or-array `aud`). |
+| docs | `README.md`, `docs/API.md`, `docs/CONFIGURATION.md` | OIDC `password`/`client_credentials`/introspection documented as confidential (require `AUTH_CLIENT_SECRET`, disabled by default); authorization-code PKCE noted; added `client_secret`, `enable_test_endpoints`, `secret.key`, and the Kerberos NTP requirement. |
+
+**Build verification:** Go SDK `go build`/`go vet` clean. The JS SDK ships without a
+`tsconfig.json` (pre-existing) and the .NET toolchain is absent in this environment,
+so those two could not be fully compiled here — changes mirror existing patterns and
+were reviewed by hand. Recommend wiring SDK builds into CI.
+
+All three SDKs now (a) pin RS256, (b) fail closed on missing `exp`, (c) refuse
+refresh tokens as access tokens, and (d) make issuer/audience validation opt-in so
+`verify()` works against the stock server (login tokens use `iss="simpleauth"`). The
+Python SDK (S1) already followed this model.
 </content>

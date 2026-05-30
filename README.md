@@ -449,7 +449,7 @@ SimpleAuth is a standard OpenID Connect provider. Use any OIDC client library.
 | Introspection | `POST` | `/realms/{issuer}/protocol/openid-connect/token/introspect` |
 | End Session | `GET/POST` | `/realms/{issuer}/protocol/openid-connect/logout` |
 
-**Supported flows:** `authorization_code`, `client_credentials`, `password`, `refresh_token`
+**Supported flows:** `authorization_code` and `refresh_token` are public (no client secret). The authorization-code flow supports **PKCE** (S256). The `password` and `client_credentials` grants and **token introspection** are confidential: they are **disabled unless you set `AUTH_CLIENT_SECRET`**, and then require that secret (`client_secret` via post body or HTTP Basic).
 
 ```bash
 # Example: Authorization Code Flow

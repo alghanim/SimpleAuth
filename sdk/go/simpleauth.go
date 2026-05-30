@@ -30,6 +30,14 @@ type Options struct {
 	URL                string // SimpleAuth server URL (e.g. "https://auth.example.com/sauth")
 	AdminKey           string // Admin API key (for admin operations and bootstrap)
 	InsecureSkipVerify bool   // Allow self-signed TLS certificates
+
+	// ExpectedIssuer, when non-empty, must equal the token's `iss` claim.
+	// Leave empty to skip the issuer check. NOTE: direct login/refresh tokens
+	// are issued with iss="simpleauth"; OIDC code-flow tokens use the realm URL.
+	ExpectedIssuer string
+	// Audience, when non-empty, must be present in the token's `aud` claim.
+	// Leave empty to skip the audience check.
+	Audience string
 }
 
 // TokenResponse is the OAuth2 token endpoint response.
@@ -106,6 +114,9 @@ type Client struct {
 	adminKey string
 	http     *http.Client
 
+	expectedIssuer string
+	audience       string
+
 	mu      sync.RWMutex
 	keys    map[string]*rsa.PublicKey
 	keysAt  time.Time
@@ -120,11 +131,13 @@ func New(opts Options) *Client {
 	}
 
 	return &Client{
-		baseURL:  strings.TrimRight(opts.URL, "/"),
-		adminKey: opts.AdminKey,
-		http:     &http.Client{Transport: transport, Timeout: 30 * time.Second},
-		keys:     make(map[string]*rsa.PublicKey),
-		keysTTL:  1 * time.Hour,
+		baseURL:        strings.TrimRight(opts.URL, "/"),
+		adminKey:       opts.AdminKey,
+		http:           &http.Client{Transport: transport, Timeout: 30 * time.Second},
+		expectedIssuer: opts.ExpectedIssuer,
+		audience:       opts.Audience,
+		keys:           make(map[string]*rsa.PublicKey),
+		keysTTL:        1 * time.Hour,
 	}
 }
 
@@ -453,16 +466,38 @@ func (c *Client) Verify(tokenString string) (*User, error) {
 		return nil, fmt.Errorf("simpleauth: decode JWT payload: %w", err)
 	}
 
-	// Check expiration.
+	// Parse standard claims for validation.
 	var claims struct {
-		Exp json.Number `json:"exp"`
+		Exp      json.Number `json:"exp"`
+		Iss      string      `json:"iss"`
+		Aud      audience    `json:"aud"`
+		FamilyID string      `json:"family_id"`
 	}
-	if err := json.Unmarshal(payloadJSON, &claims); err == nil {
-		if expInt, err := claims.Exp.Int64(); err == nil {
-			if time.Now().Unix() > expInt {
-				return nil, errors.New("simpleauth: token has expired")
-			}
-		}
+	if err := json.Unmarshal(payloadJSON, &claims); err != nil {
+		return nil, fmt.Errorf("simpleauth: decode JWT claims: %w", err)
+	}
+
+	// Reject refresh tokens presented as access tokens: they are RS256-signed
+	// by the same key but carry a family_id and no authorization claims.
+	if claims.FamilyID != "" {
+		return nil, errors.New("simpleauth: refresh token is not valid for resource access")
+	}
+
+	// Expiration is mandatory — fail closed if the claim is absent or unparseable.
+	expInt, err := claims.Exp.Int64()
+	if err != nil || expInt == 0 {
+		return nil, errors.New("simpleauth: token missing a valid exp claim")
+	}
+	if time.Now().Unix() > expInt {
+		return nil, errors.New("simpleauth: token has expired")
+	}
+
+	// Optional issuer / audience checks.
+	if c.expectedIssuer != "" && claims.Iss != c.expectedIssuer {
+		return nil, fmt.Errorf("simpleauth: unexpected issuer %q", claims.Iss)
+	}
+	if c.audience != "" && !claims.Aud.contains(c.audience) {
+		return nil, fmt.Errorf("simpleauth: token audience does not include %q", c.audience)
 	}
 
 	var user User
@@ -470,6 +505,33 @@ func (c *Client) Verify(tokenString string) (*User, error) {
 		return nil, fmt.Errorf("simpleauth: decode JWT claims: %w", err)
 	}
 	return &user, nil
+}
+
+// audience handles the `aud` claim which may be encoded as a single string or
+// an array of strings.
+type audience []string
+
+func (a *audience) UnmarshalJSON(b []byte) error {
+	var single string
+	if err := json.Unmarshal(b, &single); err == nil {
+		*a = []string{single}
+		return nil
+	}
+	var multi []string
+	if err := json.Unmarshal(b, &multi); err != nil {
+		return err
+	}
+	*a = multi
+	return nil
+}
+
+func (a audience) contains(s string) bool {
+	for _, v := range a {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------

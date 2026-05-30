@@ -10,6 +10,15 @@ export interface SimpleAuthOptions {
   url: string;
   /** Admin API key for admin operations */
   adminKey?: string;
+  /**
+   * If set, verify() requires the token's `iss` claim to equal this value.
+   * Leave undefined to skip the issuer check. Note: direct login/refresh
+   * tokens are issued with iss="simpleauth"; OIDC code-flow tokens use the
+   * realm URL.
+   */
+  expectedIssuer?: string;
+  /** If set, verify() requires this value to be present in the `aud` claim. */
+  audience?: string;
 }
 
 export interface TokenResponse {
@@ -363,12 +372,16 @@ class JWKSCache {
 export class SimpleAuth {
   private readonly url: string;
   private readonly adminKey?: string;
+  private readonly expectedIssuer?: string;
+  private readonly audience?: string;
   private readonly jwksCache: JWKSCache;
 
   constructor(options: SimpleAuthOptions) {
     // Strip trailing slash
     this.url = options.url.replace(/\/+$/, '');
     this.adminKey = options.adminKey;
+    this.expectedIssuer = options.expectedIssuer;
+    this.audience = options.audience;
 
     const jwksUrl = `${this.url}/.well-known/jwks.json`;
     this.jwksCache = new JWKSCache(jwksUrl);
@@ -476,19 +489,37 @@ export class SimpleAuth {
       throw new SimpleAuthError('Invalid token signature', 401);
     }
 
-    // Check expiration
+    // Reject refresh tokens presented as access tokens: they are signed by the
+    // same key but carry a family_id and no authorization claims.
+    if (payload.family_id) {
+      throw new SimpleAuthError('Refresh token is not valid for resource access', 401);
+    }
+
+    // Expiration is mandatory — fail closed if the claim is absent.
     const now = Math.floor(Date.now() / 1000);
-    if (payload.exp && payload.exp < now) {
+    if (typeof payload.exp !== 'number') {
+      throw new SimpleAuthError('Token missing a valid exp claim', 401);
+    }
+    if (payload.exp < now) {
       throw new SimpleAuthError('Token has expired', 401);
     }
 
-    // Check issuer — accept the server URL as issuer
-    const expectedIssuer = this.url;
-    if (payload.iss && payload.iss !== expectedIssuer) {
+    // Issuer check is opt-in. Direct login tokens use iss="simpleauth", so the
+    // old hardcoded URL check rejected every login token — only enforce when
+    // an expectedIssuer is configured.
+    if (this.expectedIssuer && payload.iss !== this.expectedIssuer) {
       throw new SimpleAuthError(
-        `Invalid issuer: expected "${expectedIssuer}", got "${payload.iss}"`,
+        `Invalid issuer: expected "${this.expectedIssuer}", got "${payload.iss ?? ''}"`,
         401,
       );
+    }
+
+    // Optional audience check.
+    if (this.audience) {
+      const aud = Array.isArray(payload.aud) ? payload.aud : payload.aud ? [payload.aud] : [];
+      if (!aud.includes(this.audience)) {
+        throw new SimpleAuthError(`Token audience does not include "${this.audience}"`, 401);
+      }
     }
 
     return payloadToUser(payload);
