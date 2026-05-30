@@ -536,9 +536,21 @@ func (h *Handler) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Issue new tokens (same family)
-	roles, _ := h.store.GetUserRoles(user.GUID)
-	perms := h.resolveUserPermissions(user.GUID, roles)
+	// Refresh stays bound to the app the token was issued for (v2). Re-resolve the
+	// app so a disabled/deleted app stops minting tokens (M10), and recompute the
+	// per-app roles + the require_assignment gate instead of carrying the user's
+	// GLOBAL roles — using global roles here let a scoped token escalate on refresh
+	// (H5).
+	app, err := h.resolveApp(storedRT.AppID)
+	if err != nil {
+		jsonError(w, "app unavailable", http.StatusUnauthorized)
+		return
+	}
+	roles, perms, denied := h.resolveTokenRoles(app, user)
+	if denied {
+		jsonError(w, "access denied: not assigned to this app", http.StatusForbidden)
+		return
+	}
 
 	newClaims := auth.Claims{
 		GUID:              user.GUID,

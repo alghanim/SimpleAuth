@@ -58,7 +58,7 @@ source of truth for what is currently open vs. fixed.
 | S3 | Go SDK accepts refresh tokens as access tokens; skips `exp` when absent | MEDIUM | FIXED | 2026-05-30 |
 | I1 | Single static admin key = entire authz model; actions audited as "admin" | INFO | WONTFIX | by design (documented) |
 | I2 | No tests for `internal/auth` / `internal/config` | INFO | PARTIAL | 2026-05-30 (added auth + crypto + PKCE + consume tests) |
-| H5 | v1 `/api/auth/refresh` drops per-app authz → privilege escalation | HIGH | OPEN | — (v2 branch, pre-release) |
+| H5 | v1 `/api/auth/refresh` drops per-app authz → privilege escalation | HIGH | FIXED | 2026-05-31 (branch `v2`) |
 | H6 | `require_assignment` fails open when an app has no per-app authz | HIGH | FIXED | 2026-05-31 (branch `v2`) |
 | H7 | App-management token accepted as a user access token (no `typ` gate) | HIGH | OPEN | — (v2 branch, pre-release) |
 | H8 | `DeleteApp` orphans app-local users → cross-tenant resurrection on app_id reuse | HIGH | OPEN | — (v2 branch, pre-release) |
