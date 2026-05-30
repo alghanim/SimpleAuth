@@ -2534,3 +2534,25 @@ Fields: `app_id` (optional — derived from `name` if omitted; lowercase
 `cors_origins`, `require_assignment` (default `false`), `allow_local_users`
 (default `false`). On first v2 startup a **default app** is auto-created from your
 existing single-client config so v1 deployments keep working unchanged.
+
+### Audience-scoped tokens (Milestone 2)
+
+Tokens are now **scoped to one app**. A token minted for app A carries `aud: "A"`
+and is rejected by every other app — verify it client-side with the SDK
+`audience` option (set `audience` to your app's id/audience).
+
+- **Direct login** accepts an `app_id` (or `client_id`) field; the issued token's
+  `aud` is that app. Omit it and you get the **default app**.
+  ```bash
+  curl -X POST …/sauth/api/auth/login -H "Content-Type: application/json" \
+    -d '{"username":"alice","password":"secret","app_id":"billing"}'
+  # access_token aud = "billing"
+  ```
+- **OIDC** uses `client_id` to select the app; `aud`, `azp`, and the
+  `resource_access` key are the app. The app's own `redirect_uris` are honored
+  when set (falling back to the global allowlist).
+- **Refresh** stays bound to the app the family was issued for — a refresh of an
+  app-A token only ever mints app-A tokens.
+
+> Note: in Milestone 2 the `aud` is per-app but the **role contents** are still
+> global. Per-app roles/permissions/assignments arrive in Milestone 3.

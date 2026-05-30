@@ -180,7 +180,7 @@ func (h *Handler) handleOIDCAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_ = r.FormValue("client_id") // accepted for backward compat, not validated
+	clientID := r.FormValue("client_id")
 	redirectURI := r.FormValue("redirect_uri")
 	state := r.FormValue("state")
 	nonce := r.FormValue("nonce")
@@ -195,7 +195,13 @@ func (h *Handler) handleOIDCAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if redirectURI != "" && !isAllowedRedirect(h.getRedirectURIs(), redirectURI) {
+	// Resolve the app (v2) — client_id identifies the app; empty → default app.
+	app, err := h.resolveApp(clientID)
+	if err != nil {
+		http.Error(w, "unknown client", http.StatusBadRequest)
+		return
+	}
+	if redirectURI != "" && !h.appAllowsRedirect(app, redirectURI) {
 		http.Error(w, "redirect_uri not allowed", http.StatusBadRequest)
 		return
 	}
@@ -235,13 +241,14 @@ func (h *Handler) handleOIDCAuthorize(w http.ResponseWriter, r *http.Request) {
 		"flow": "authorization_code",
 	})
 
-	h.issueOIDCCodeRedirect(w, r, user, redirectURI, scope, state, nonce, codeChallenge, codeChallengeMethod)
+	h.issueOIDCCodeRedirect(w, r, user, app.AppID, redirectURI, scope, state, nonce, codeChallenge, codeChallengeMethod)
 }
 
 // issueOIDCCodeRedirect mints an OIDC auth code for `user` and redirects the
 // browser to `redirectURI?code=...&state=...`. Used by both the normal POST
-// login path and the session-cookie fast path.
-func (h *Handler) issueOIDCCodeRedirect(w http.ResponseWriter, r *http.Request, user *store.User, redirectURI, scope, state, nonce, codeChallenge, codeChallengeMethod string) {
+// login path and the session-cookie fast path. appID binds the code (and the
+// tokens it yields) to the app (v2 audience-scoped tokens).
+func (h *Handler) issueOIDCCodeRedirect(w http.ResponseWriter, r *http.Request, user *store.User, appID, redirectURI, scope, state, nonce, codeChallenge, codeChallengeMethod string) {
 	codeBytes := make([]byte, 32)
 	if _, err := rand.Read(codeBytes); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -252,6 +259,7 @@ func (h *Handler) issueOIDCCodeRedirect(w http.ResponseWriter, r *http.Request, 
 	ac := &store.OIDCAuthCode{
 		Code:                code,
 		UserGUID:            user.GUID,
+		AppID:               appID,
 		RedirectURI:         redirectURI,
 		Scope:               scope,
 		Nonce:               nonce,
@@ -281,10 +289,14 @@ func (h *Handler) issueOIDCCodeRedirect(w http.ResponseWriter, r *http.Request, 
 }
 
 func (h *Handler) showOIDCLoginPage(w http.ResponseWriter, r *http.Request) {
-	_ = r.URL.Query().Get("client_id") // accepted for backward compat, not validated
+	app, err := h.resolveApp(r.URL.Query().Get("client_id"))
+	if err != nil {
+		http.Error(w, "unknown client", http.StatusBadRequest)
+		return
+	}
 
 	redirectURI := r.URL.Query().Get("redirect_uri")
-	if redirectURI != "" && !isAllowedRedirect(h.getRedirectURIs(), redirectURI) {
+	if redirectURI != "" && !h.appAllowsRedirect(app, redirectURI) {
 		http.Error(w, "redirect_uri not allowed", http.StatusBadRequest)
 		return
 	}
@@ -303,7 +315,7 @@ func (h *Handler) showOIDCLoginPage(w http.ResponseWriter, r *http.Request) {
 	if errorMsg == "" && prompt != "login" {
 		if guid := h.resolveSessionCookie(w, r); guid != "" {
 			if user, err := h.store.ResolveUser(guid); err == nil && !user.Disabled {
-				h.issueOIDCCodeRedirect(w, r, user, redirectURI, scope, state, nonce, codeChallenge, codeChallengeMethod)
+				h.issueOIDCCodeRedirect(w, r, user, app.AppID, redirectURI, scope, state, nonce, codeChallenge, codeChallengeMethod)
 				return
 			}
 		}
@@ -435,8 +447,14 @@ func (h *Handler) handleOIDCTokenAuthCode(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	log.Printf("[oidc] Auth code exchange user=%q guid=%s ip=%s", h.resolvePreferredUsername(user), user.GUID, getClientIP(r))
-	h.issueOIDCTokens(w, r, user, ac.Scope, ac.Nonce)
+	app, err := h.resolveApp(ac.AppID)
+	if err != nil {
+		oidcError(w, "invalid_grant", "unknown client", http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("[oidc] Auth code exchange user=%q guid=%s app=%q ip=%s", h.resolvePreferredUsername(user), user.GUID, app.AppID, getClientIP(r))
+	h.issueOIDCTokens(w, r, user, ac.Scope, ac.Nonce, app)
 }
 
 func (h *Handler) handleOIDCTokenPassword(w http.ResponseWriter, r *http.Request) {
@@ -486,8 +504,14 @@ func (h *Handler) handleOIDCTokenPassword(w http.ResponseWriter, r *http.Request
 	// Assign default roles
 	h.assignDefaultRoles(user.GUID)
 
-	log.Printf("[oidc] Password grant success user=%q guid=%s ip=%s", username, user.GUID, ip)
-	h.issueOIDCTokens(w, r, user, scope, "")
+	app, err := h.resolveApp(r.FormValue("client_id"))
+	if err != nil {
+		oidcError(w, "invalid_client", "unknown client", http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("[oidc] Password grant success user=%q guid=%s app=%q ip=%s", username, user.GUID, app.AppID, ip)
+	h.issueOIDCTokens(w, r, user, scope, "", app)
 }
 
 func (h *Handler) handleOIDCTokenClientCredentials(w http.ResponseWriter, r *http.Request) {
@@ -498,14 +522,20 @@ func (h *Handler) handleOIDCTokenClientCredentials(w http.ResponseWriter, r *htt
 		return
 	}
 
-	// Client credentials — no user context, sub = client_id
+	app, err := h.resolveApp(r.FormValue("client_id"))
+	if err != nil {
+		oidcError(w, "invalid_client", "unknown client", http.StatusBadRequest)
+		return
+	}
+
+	// Client credentials — no user context, sub = app_id, aud = app (v2).
 	issuer := h.oidcIssuer(r)
 	claims := auth.Claims{
 		Typ:   "Bearer",
 		Scope: r.FormValue("scope"),
 	}
-	claims.Subject = h.oidcClientID()
-	claims.Audience = []string{h.oidcClientID()}
+	claims.Subject = app.AppID
+	claims.Audience = []string{appAudience(app)}
 
 	accessToken, err := h.jwt.IssueAccessTokenWithIssuer(claims, h.cfg.AccessTTL, issuer)
 	if err != nil {
@@ -513,8 +543,8 @@ func (h *Handler) handleOIDCTokenClientCredentials(w http.ResponseWriter, r *htt
 		return
 	}
 
-	log.Printf("[oidc] Client credentials grant client_id=%s ip=%s", h.oidcClientID(), getClientIP(r))
-	h.audit("oidc_token", h.oidcClientID(), getClientIP(r), map[string]interface{}{
+	log.Printf("[oidc] Client credentials grant app=%s ip=%s", app.AppID, getClientIP(r))
+	h.audit("oidc_token", app.AppID, getClientIP(r), map[string]interface{}{
 		"grant_type": "client_credentials",
 	})
 
@@ -575,8 +605,11 @@ func (h *Handler) handleOIDCTokenRefresh(w http.ResponseWriter, r *http.Request)
 	roles, _ := h.store.GetUserRoles(user.GUID)
 	perms, _ := h.store.GetUserPermissions(user.GUID)
 
+	// Refresh stays bound to the same app (v2): re-stamp the original audience.
+	app, _ := h.resolveApp(storedRT.AppID)
+
 	issuer := h.oidcIssuer(r)
-	accessClaims := h.buildOIDCAccessClaims(user, roles, perms, nil, "")
+	accessClaims := h.buildOIDCAccessClaims(user, roles, perms, nil, "", app)
 	accessToken, err := h.jwt.IssueAccessTokenWithIssuer(accessClaims, h.cfg.AccessTTL, issuer)
 	if err != nil {
 		oidcError(w, "server_error", "token generation failed", http.StatusInternalServerError)
@@ -595,6 +628,8 @@ func (h *Handler) handleOIDCTokenRefresh(w http.ResponseWriter, r *http.Request)
 		UserGUID:  user.GUID,
 		ExpiresAt: time.Now().UTC().Add(h.cfg.RefreshTTL),
 		CreatedAt: time.Now().UTC(),
+		AppID:     storedRT.AppID,
+		Audience:  storedRT.Audience,
 	}
 	if err := h.store.SaveRefreshToken(rt); err != nil {
 		oidcError(w, "server_error", "refresh token generation failed", http.StatusInternalServerError)
@@ -611,14 +646,14 @@ func (h *Handler) handleOIDCTokenRefresh(w http.ResponseWriter, r *http.Request)
 }
 
 // issueOIDCTokens generates access_token, refresh_token, and id_token for a user.
-func (h *Handler) issueOIDCTokens(w http.ResponseWriter, r *http.Request, user *store.User, scope, nonce string) {
+func (h *Handler) issueOIDCTokens(w http.ResponseWriter, r *http.Request, user *store.User, scope, nonce string, app *store.App) {
 	roles, _ := h.store.GetUserRoles(user.GUID)
 	perms := h.resolveUserPermissions(user.GUID, roles)
 	issuer := h.oidcIssuer(r)
 	ip := getClientIP(r)
 
-	// Access token with Keycloak-compatible claims
-	accessClaims := h.buildOIDCAccessClaims(user, roles, perms, nil, scope)
+	// Access token with Keycloak-compatible claims (per-app audience in v2).
+	accessClaims := h.buildOIDCAccessClaims(user, roles, perms, nil, scope, app)
 	accessToken, err := h.jwt.IssueAccessTokenWithIssuer(accessClaims, h.cfg.AccessTTL, issuer)
 	if err != nil {
 		oidcError(w, "server_error", "token generation failed", http.StatusInternalServerError)
@@ -639,28 +674,36 @@ func (h *Handler) issueOIDCTokens(w http.ResponseWriter, r *http.Request, user *
 		ExpiresAt: time.Now().UTC().Add(h.cfg.RefreshTTL),
 		CreatedAt: time.Now().UTC(),
 	}
+	if app != nil {
+		rt.AppID = app.AppID
+		rt.Audience = appAudience(app)
+	}
 	if err := h.store.SaveRefreshToken(rt); err != nil {
 		oidcError(w, "server_error", "refresh token generation failed", http.StatusInternalServerError)
 		return
 	}
 
-	// ID token
+	// ID token — audience/azp = the app (v2).
+	idClientID := h.oidcClientID()
+	idAud := idClientID
+	if app != nil {
+		idClientID = app.AppID
+		idAud = appAudience(app)
+	}
 	idClaims := auth.Claims{
-		Name:             user.DisplayName,
-		Email:            user.Email,
+		Name:              user.DisplayName,
+		Email:             user.Email,
 		PreferredUsername: user.Email,
-		Nonce:            nonce,
-		AtHash:           auth.ComputeAtHash(accessToken),
-		Typ:              "ID",
-		Azp:              h.oidcClientID(),
+		Nonce:             nonce,
+		AtHash:            auth.ComputeAtHash(accessToken),
+		Typ:               "ID",
+		Azp:               idClientID,
 	}
 	if user.Email == "" {
 		idClaims.PreferredUsername = user.DisplayName
 	}
 	idClaims.Subject = user.GUID
-	// Use the canonical client_id (cfg.ClientID has no default, which produced
-	// an empty id_token audience on stock installs — M1).
-	idClaims.Audience = []string{h.oidcClientID()}
+	idClaims.Audience = []string{idAud}
 
 	idToken, err := h.jwt.IssueIDToken(idClaims, h.cfg.AccessTTL, issuer)
 	if err != nil {
@@ -687,10 +730,19 @@ func (h *Handler) issueOIDCTokens(w http.ResponseWriter, r *http.Request, user *
 }
 
 // buildOIDCAccessClaims constructs Keycloak-compatible access token claims.
-func (h *Handler) buildOIDCAccessClaims(user *store.User, roles, perms, groups []string, scope string) auth.Claims {
+// When app is non-nil the audience, azp, and resource_access key are the app
+// (v2 per-app authorization); otherwise the legacy single client_id is used.
+func (h *Handler) buildOIDCAccessClaims(user *store.User, roles, perms, groups []string, scope string, app *store.App) auth.Claims {
 	preferredUsername := user.Email
 	if preferredUsername == "" {
 		preferredUsername = user.DisplayName
+	}
+
+	clientID := h.oidcClientID()
+	aud := clientID
+	if app != nil {
+		clientID = app.AppID
+		aud = appAudience(app)
 	}
 
 	claims := auth.Claims{
@@ -705,15 +757,15 @@ func (h *Handler) buildOIDCAccessClaims(user *store.User, roles, perms, groups [
 		Groups:            groups,
 		PreferredUsername: preferredUsername,
 		Typ:               "Bearer",
-		Azp:               h.oidcClientID(),
+		Azp:               clientID,
 		Scope:             scope,
 		RealmAccess:       &auth.RealmAccess{Roles: roles},
 		ResourceAccess: map[string]*auth.ResourceAccess{
-			h.oidcClientID(): {Roles: roles},
+			clientID: {Roles: roles},
 		},
 	}
 	claims.Subject = user.GUID
-	claims.Audience = []string{h.oidcClientID()}
+	claims.Audience = []string{aud}
 
 	if scope == "" {
 		claims.Scope = "openid profile email"

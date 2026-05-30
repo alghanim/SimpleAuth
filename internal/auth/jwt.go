@@ -149,6 +149,7 @@ func (m *JWTManager) IssueAccessToken(c Claims, ttl time.Duration) (string, erro
 	c.RegisteredClaims = jwt.RegisteredClaims{
 		Issuer:    m.issuer,
 		Subject:   c.Subject,
+		Audience:  c.Audience, // preserve caller-set audience (v2 per-app aud)
 		IssuedAt:  jwt.NewNumericDate(now),
 		ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
 		ID:        uuid.New().String(),

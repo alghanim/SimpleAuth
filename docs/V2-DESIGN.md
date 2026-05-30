@@ -266,7 +266,7 @@ docs get per-app `aud`/`client_id` updates.
 ## 13. Milestones
 
 1. **Apps registry** — `apps` table, master CRUD, secret hash + rotation, default-app migration. (No behavior change yet.) ✅ **Done** (store CRUD in both backends + backend migration, `POST/GET/PUT/DELETE /api/admin/apps` + `…/rotate-secret`, bcrypt secret hash shown once, default-app migration on startup, store + HTTP tests). SDK app-registry helpers fold into M2/M6 with the developer-facing surface (app-registry is a root-admin operation, not app integration).
-2. **Audience-scoped tokens** — stamp `aud`; OIDC `client_id = app_id`; direct-login app context.
+2. **Audience-scoped tokens** — stamp `aud`; OIDC `client_id = app_id`; direct-login app context. ✅ **Done** (every access token carries `aud` = the resolved app's audience; refresh tokens are bound to their app and re-stamp it; OIDC `client_id` selects the app and sets `aud`/`azp`/`resource_access`; per-app `redirect_uris` honored when set; direct `/api/auth/login` accepts `app_id`/`client_id`; absent → default app. Tests: `TestAudienceScopedTokens`.) Per-app **roles** are still M3 — `aud` is scoped now, role *contents* are still global until then. SDKs already verify `aud` via the `audience` option (shipped in v1.1.0 S2/S3).
 3. **Per-app roles/permissions/assignments** — tables + resolution at token issuance + `require_assignment`.
 4. **App self-management API** — `/api/app/*` + Basic/management-token auth + app-scoped `bootstrap`.
 5. **App-local users** — `owner_app_id`, provisioning API, app-scoped login.

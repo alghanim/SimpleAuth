@@ -83,6 +83,10 @@ type RefreshToken struct {
 	Used      bool      `json:"used"`
 	ExpiresAt time.Time `json:"expires_at"`
 	CreatedAt time.Time `json:"created_at"`
+	// AppID/Audience bind the token family to one app (v2). A refresh token for
+	// app A only ever mints app-A access tokens (aud = Audience).
+	AppID    string `json:"app_id,omitempty"`
+	Audience string `json:"audience,omitempty"`
 }
 
 type AuditEntry struct {
@@ -106,6 +110,7 @@ type AuditQuery struct {
 type OIDCAuthCode struct {
 	Code        string    `json:"code"`
 	UserGUID    string    `json:"user_guid"`
+	AppID       string    `json:"app_id,omitempty"` // resolved from client_id at authorize (v2)
 	RedirectURI string    `json:"redirect_uri"`
 	Scope       string    `json:"scope"`
 	Nonce       string    `json:"nonce"`
