@@ -247,10 +247,12 @@ rendering; URL components of the SSO link remain `url.QueryEscape`d.
 
 ## Remediation Log — Audit Pass 1 (2026-05-30, Claude Opus 4.8)
 
-Released in **v2.0.0** (major bump — these fixes include breaking behavior changes;
-see Operator notes). All changes on branch `security-hardening-2026-05-30`. Build,
-`go vet`, and the test suite are green. Pre-existing non-gofmt formatting was left
-untouched to keep the diff scoped to security.
+Released in **v1.1.0** — kept on the v1 line by request (v2.0.0 is reserved for
+upcoming major work). Note: despite the minor version, these fixes include
+**breaking behavior changes** — see Operator notes. All changes on branch
+`security-hardening-2026-05-30`. Build, `go vet`, and the test suite are green.
+Pre-existing non-gofmt formatting was left untouched to keep the diff scoped to
+security.
 
 | ID | Files | Approach |
 |----|-------|----------|
