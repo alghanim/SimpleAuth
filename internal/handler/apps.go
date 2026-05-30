@@ -88,26 +88,39 @@ func (h *Handler) resolveTokenRoles(app *store.App, user *store.User) (roles, pe
 	authz, _ := h.store.GetAppAuthz(app.AppID)
 	hasPerApp := authz != nil && (len(authz.Roles) > 0 || len(authz.UserAssignments) > 0 || len(authz.GroupAssignments) > 0)
 
-	if !hasPerApp {
-		// v1 back-compat: the app hasn't defined its own authz yet, so carry the
-		// global roles/permissions exactly as v1 did.
-		gRoles, _ := h.store.GetUserRoles(user.GUID)
-		return gRoles, h.resolveUserPermissions(user.GUID, gRoles), false
-	}
-
+	// Compute this user's per-app assignment (direct + group), if any authz exists.
 	roleSet := map[string]struct{}{}
 	assigned := false
-	add := func(rs []string) {
-		for _, r := range rs {
-			roleSet[r] = struct{}{}
-			assigned = true
+	if authz != nil {
+		add := func(rs []string) {
+			for _, r := range rs {
+				roleSet[r] = struct{}{}
+				assigned = true
+			}
+		}
+		for _, key := range h.userAssignmentKeys(user) {
+			add(authz.UserAssignments[key])
+		}
+		for _, g := range user.Groups {
+			add(authz.GroupAssignments[g])
 		}
 	}
-	for _, key := range h.userAssignmentKeys(user) {
-		add(authz.UserAssignments[key])
+
+	// require_assignment denies directory users with no per-app assignment. This
+	// is evaluated BEFORE the v1 global-roles fallback (H6): an app that flips the
+	// flag on but hasn't populated assignments must fail CLOSED, not admit every
+	// directory user with their global roles. App-local users owned by this app
+	// are inherently the app's and exempt (M5).
+	if app.RequireAssignment && !assigned && user.OwnerAppID != app.AppID {
+		return nil, nil, true
 	}
-	for _, g := range user.Groups {
-		add(authz.GroupAssignments[g])
+
+	// v1 back-compat: when the app hasn't defined its own authz AND doesn't
+	// require assignment, carry the global roles/permissions exactly as v1 did so
+	// existing single-app deployments keep working until they define per-app authz.
+	if !hasPerApp && !app.RequireAssignment {
+		gRoles, _ := h.store.GetUserRoles(user.GUID)
+		return gRoles, h.resolveUserPermissions(user.GUID, gRoles), false
 	}
 
 	roles = sortedKeys(roleSet)
@@ -119,13 +132,7 @@ func (h *Handler) resolveTokenRoles(app *store.App, user *store.User) (roles, pe
 		}
 	}
 	perms = sortedKeys(permSet)
-
-	// require_assignment denies directory users with no assignment. App-local
-	// users (owned by this app) are inherently the app's and exempt (M5).
-	if app.RequireAssignment && !assigned && user.OwnerAppID != app.AppID {
-		denied = true
-	}
-	return roles, perms, denied
+	return roles, perms, false
 }
 
 func sortedKeys(m map[string]struct{}) []string {
