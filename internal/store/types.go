@@ -92,8 +92,13 @@ type OIDCAuthCode struct {
 	RedirectURI string    `json:"redirect_uri"`
 	Scope       string    `json:"scope"`
 	Nonce       string    `json:"nonce"`
-	ExpiresAt   time.Time `json:"expires_at"`
-	CreatedAt   time.Time `json:"created_at"`
+	// PKCE (RFC 7636) — set when the client supplied a code_challenge on the
+	// authorize request. When present, the token exchange must present a
+	// matching code_verifier.
+	CodeChallenge       string    `json:"code_challenge,omitempty"`
+	CodeChallengeMethod string    `json:"code_challenge_method,omitempty"`
+	ExpiresAt           time.Time `json:"expires_at"`
+	CreatedAt           time.Time `json:"created_at"`
 }
 
 // DatabaseInfo holds stats about the active database backend.

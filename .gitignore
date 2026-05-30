@@ -1,5 +1,6 @@
-# Binary
-simpleauth
+# Binary (root build output only — anchored so it doesn't match the
+# sdk/python/simpleauth/ package or other paths named "simpleauth")
+/simpleauth
 
 # Build output
 /dist/
@@ -25,3 +26,16 @@ simpleauth.yml
 # Environment
 .env
 encrypt.key
+
+# Secrets / at-rest data key (never commit) and generated key material
+secret.key
+**/secret.key
+*.keytab
+private.pem
+public.pem
+
+# Python
+__pycache__/
+*.py[cod]
+sdk/python/dist/
+sdk/python/*.egg-info/

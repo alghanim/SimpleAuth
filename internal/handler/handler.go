@@ -26,6 +26,10 @@ type Handler struct {
 	migration       *migrationState
 	runtimeSettings runtimeSettingsCache
 	restartCh       chan<- struct{}
+	// secretKey is the AES-256 data key for encrypting secrets at rest (e.g.
+	// the LDAP bind password). Loaded from <data_dir>/secret.key. May be nil if
+	// the key could not be loaded; legacy plaintext still reads in that case.
+	secretKey []byte
 }
 
 func New(cfg *config.Config, s store.Store, jwtMgr *auth.JWTManager, uiFS fs.FS, version string) *Handler {
@@ -40,6 +44,15 @@ func New(cfg *config.Config, s store.Store, jwtMgr *auth.JWTManager, uiFS fs.FS,
 	// Set trusted proxy CIDRs for getClientIP
 	trustedCIDRs = cfg.TrustedProxyCIDRs
 
+	// Load (or create) the at-rest encryption key for secrets like the LDAP
+	// bind password (H4). Best-effort: on failure, log and continue — legacy
+	// plaintext still reads, and new saves will surface the error.
+	if key, err := loadOrCreateSecretKey(cfg.DataDir); err != nil {
+		log.Printf("[secrets] could not load %s: %v — secrets at rest disabled", secretKeyFile, err)
+	} else {
+		h.secretKey = key
+	}
+
 	h.initMigrationState()
 	h.initRuntimeSettings()
 	h.registerRoutes(uiFS)
@@ -53,6 +66,10 @@ func (h *Handler) SetRestartChannel(ch chan<- struct{}) {
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-SimpleAuth-Version", h.version)
+	// Baseline security headers on every response (M8). The admin UI sets a
+	// stricter CSP of its own; these are the safe global defaults.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "no-referrer")
 	corsOrigins := h.getCORSOrigins()
 	if corsOrigins != "" {
 		origin := r.Header.Get("Origin")
@@ -120,8 +137,13 @@ func (h *Handler) registerRoutes(uiFS fs.FS) {
 	h.mux.HandleFunc("GET /api/auth/userinfo", h.handleUserInfo)
 	h.mux.HandleFunc("POST /api/auth/impersonate", h.requireMasterAdmin(h.handleImpersonate))
 	h.mux.HandleFunc("GET /api/auth/negotiate", h.handleNegotiate)
-	h.mux.HandleFunc("GET /test-negotiate", h.handleNegotiateTest)
-	h.mux.HandleFunc("POST /test-negotiate", h.handleNegotiateTestForm)
+	// Diagnostic Kerberos/LDAP test pages — unauthenticated and perform live
+	// LDAP binds (a password oracle), so gated behind an explicit flag
+	// (default off; H1). Enable with AUTH_ENABLE_TEST_ENDPOINTS=true.
+	if h.cfg.EnableTestEndpoints {
+		h.mux.HandleFunc("GET /test-negotiate", h.handleNegotiateTest)
+		h.mux.HandleFunc("POST /test-negotiate", h.handleNegotiateTestForm)
+	}
 
 	// Root redirect
 	h.mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {

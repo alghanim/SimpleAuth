@@ -69,7 +69,7 @@ func NewJWTManager(dataDir, issuer string) (*JWTManager, error) {
 	privPath := filepath.Join(dataDir, "private.pem")
 	pubPath := filepath.Join(dataDir, "public.pem")
 
-	m := &JWTManager{issuer: issuer, kid: uuid.New().String()[:8]}
+	m := &JWTManager{issuer: issuer}
 
 	if _, err := os.Stat(privPath); os.IsNotExist(err) {
 		if err := m.generateKeys(privPath, pubPath); err != nil {
@@ -80,7 +80,24 @@ func NewJWTManager(dataDir, issuer string) (*JWTManager, error) {
 			return nil, fmt.Errorf("load rsa keys: %w", err)
 		}
 	}
+	// Derive the key ID deterministically from the public key so it is stable
+	// across restarts. Previously a random uuid was generated each boot, which
+	// meant the JWKS `kid` no longer matched tokens issued before a restart and
+	// strict clients (those that select a JWK by kid) would reject them.
+	m.kid = computeKID(m.publicKey)
 	return m, nil
+}
+
+// computeKID derives a stable key ID from the public key (first 16 chars of the
+// base64url-encoded SHA-256 over the PKIX DER encoding). Stable across restarts
+// because the RSA key itself is persisted to disk.
+func computeKID(pub *rsa.PublicKey) string {
+	der, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		return "default"
+	}
+	sum := sha256.Sum256(der)
+	return base64.RawURLEncoding.EncodeToString(sum[:])[:16]
 }
 
 func (m *JWTManager) generateKeys(privPath, pubPath string) error {
@@ -141,7 +158,11 @@ func (m *JWTManager) IssueAccessToken(c Claims, ttl time.Duration) (string, erro
 	return token.SignedString(m.privateKey)
 }
 
-func (m *JWTManager) IssueRefreshToken(userGUID, familyID string, ttl time.Duration) (string, string, error) {
+// IssueRefreshToken returns the signed token, its tokenID (jti), and the
+// resolved familyID (newly generated when the caller passes ""). Returning the
+// familyID lets callers persist the token without re-parsing it (which had a
+// nil-deref hazard when the re-parse error was ignored).
+func (m *JWTManager) IssueRefreshToken(userGUID, familyID string, ttl time.Duration) (string, string, string, error) {
 	tokenID := uuid.New().String()
 	if familyID == "" {
 		familyID = uuid.New().String()
@@ -161,9 +182,9 @@ func (m *JWTManager) IssueRefreshToken(userGUID, familyID string, ttl time.Durat
 	token.Header["kid"] = m.kid
 	signed, err := token.SignedString(m.privateKey)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
-	return signed, tokenID, nil
+	return signed, tokenID, familyID, nil
 }
 
 func (m *JWTManager) ValidateToken(tokenString string) (*Claims, error) {

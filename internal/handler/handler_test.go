@@ -29,6 +29,7 @@ func testSetup(t *testing.T) (*Handler, store.Store) {
 	}
 
 	cfg := &config.Config{
+		DataDir:        dir,
 		AdminKey:       "test-admin-key",
 		JWTIssuer:      "test-issuer",
 		AccessTTL:      1 * time.Hour,

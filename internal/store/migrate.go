@@ -70,7 +70,7 @@ func MigrateToPostgres(source *BoltStore, target *PostgresStore, statusCh chan<-
 	m.status.Progress["_prepare"] = "truncating"
 	m.send()
 	for _, table := range []string{
-		"sa_oidc_auth_codes", "sa_revoked_tokens", "sa_revoked_users",
+		"sa_sessions", "sa_oidc_auth_codes", "sa_revoked_tokens", "sa_revoked_users",
 		"sa_audit_log", "sa_refresh_tokens", "sa_user_permissions",
 		"sa_user_roles", "sa_identity_mappings", "sa_config", "sa_users",
 	} {
@@ -92,6 +92,12 @@ func MigrateToPostgres(source *BoltStore, target *PostgresStore, statusCh chan<-
 		{"refresh_tokens", bucketRefreshTokens},
 		{"audit_log", bucketAuditLog},
 		{"oidc_auth_codes", bucketOIDCAuthCodes},
+		// Security-relevant state that must survive a backend switch: SSO
+		// sessions and the access-token revocation blacklist. Omitting these
+		// previously caused revoked tokens to become valid again (H3).
+		{"sessions", bucketSessions},
+		{"revoked_tokens", bucketRevokedTokens},
+		{"revoked_users", bucketRevokedUsers},
 	}
 
 	sourceCounts := map[string]int64{}
@@ -150,6 +156,9 @@ func MigrateToPostgres(source *BoltStore, target *PostgresStore, statusCh chan<-
 		"refresh_tokens":     "sa_refresh_tokens",
 		"audit_log":          "sa_audit_log",
 		"oidc_auth_codes":    "sa_oidc_auth_codes",
+		"sessions":           "sa_sessions",
+		"revoked_tokens":     "sa_revoked_tokens",
+		"revoked_users":      "sa_revoked_users",
 	}
 	for boltName, pgTable := range verifyMap {
 		expected := sourceCounts[boltName]
@@ -209,6 +218,28 @@ func migrateKV(target *PostgresStore, table string, k, v []byte) error {
 		}
 		_, err := target.db.Exec(`INSERT INTO sa_oidc_auth_codes (code, data, expires_at) VALUES ($1, $2, $3) ON CONFLICT (code) DO NOTHING`, key, v, ac.ExpiresAt)
 		return err
+	case "sessions":
+		var sess Session
+		if err := json.Unmarshal(v, &sess); err != nil {
+			return nil
+		}
+		_, err := target.db.Exec(`INSERT INTO sa_sessions (id, user_guid, created_at, last_used_at, expires_at, user_agent, ip) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (id) DO NOTHING`,
+			sess.ID, sess.UserGUID, sess.CreatedAt, sess.LastUsedAt, sess.ExpiresAt, sess.UserAgent, sess.IP)
+		return err
+	case "revoked_tokens":
+		var expiresAt time.Time
+		if err := json.Unmarshal(v, &expiresAt); err != nil {
+			return nil
+		}
+		_, err := target.db.Exec(`INSERT INTO sa_revoked_tokens (jti, expires_at) VALUES ($1, $2) ON CONFLICT (jti) DO NOTHING`, key, expiresAt)
+		return err
+	case "revoked_users":
+		var expiresAt time.Time
+		if err := json.Unmarshal(v, &expiresAt); err != nil {
+			return nil
+		}
+		_, err := target.db.Exec(`INSERT INTO sa_revoked_users (user_guid, expires_at) VALUES ($1, $2) ON CONFLICT (user_guid) DO UPDATE SET expires_at = $2`, key, expiresAt)
+		return err
 	default:
 		return nil
 	}
@@ -236,6 +267,9 @@ func MigrateFromPostgres(source *PostgresStore, target *BoltStore, statusCh chan
 		{"refresh_tokens", "sa_refresh_tokens", `SELECT token_id, data FROM sa_refresh_tokens`},
 		{"audit_log", "sa_audit_log", `SELECT id, data FROM sa_audit_log`},
 		{"oidc_auth_codes", "sa_oidc_auth_codes", `SELECT code, data FROM sa_oidc_auth_codes`},
+		{"sessions", "sa_sessions", `SELECT id, user_guid, created_at, last_used_at, expires_at, user_agent, ip FROM sa_sessions`},
+		{"revoked_tokens", "sa_revoked_tokens", `SELECT jti, expires_at FROM sa_revoked_tokens`},
+		{"revoked_users", "sa_revoked_users", `SELECT user_guid, expires_at FROM sa_revoked_users`},
 	}
 
 	// Count totals
@@ -316,6 +350,32 @@ func MigrateFromPostgres(source *PostgresStore, target *BoltStore, statusCh chan
 				writeErr = target.db.Update(func(tx *bolt.Tx) error {
 					return tx.Bucket(bucketOIDCAuthCodes).Put([]byte(code), data)
 				})
+			case "sessions":
+				var sess Session
+				var ua, ip sql.NullString
+				rows.Scan(&sess.ID, &sess.UserGUID, &sess.CreatedAt, &sess.LastUsedAt, &sess.ExpiresAt, &ua, &ip)
+				sess.UserAgent = ua.String
+				sess.IP = ip.String
+				data, _ := json.Marshal(&sess)
+				writeErr = target.db.Update(func(tx *bolt.Tx) error {
+					return tx.Bucket(bucketSessions).Put([]byte(sess.ID), data)
+				})
+			case "revoked_tokens":
+				var jti string
+				var expiresAt time.Time
+				rows.Scan(&jti, &expiresAt)
+				data, _ := json.Marshal(expiresAt)
+				writeErr = target.db.Update(func(tx *bolt.Tx) error {
+					return tx.Bucket(bucketRevokedTokens).Put([]byte(jti), data)
+				})
+			case "revoked_users":
+				var userGUID string
+				var expiresAt time.Time
+				rows.Scan(&userGUID, &expiresAt)
+				data, _ := json.Marshal(expiresAt)
+				writeErr = target.db.Update(func(tx *bolt.Tx) error {
+					return tx.Bucket(bucketRevokedUsers).Put([]byte(userGUID), data)
+				})
 			}
 			if writeErr != nil {
 				rows.Close()
@@ -355,7 +415,7 @@ func MigrateFromPostgres(source *PostgresStore, target *BoltStore, statusCh chan
 			continue
 		}
 		if actual != expected {
-			log.Printf("[migrate] Warning: %s count mismatch: expected %d, got %d", t.name, expected, actual)
+			return m.fail(fmt.Errorf("verification failed for %s: expected %d rows, got %d", t.name, expected, actual))
 		}
 	}
 

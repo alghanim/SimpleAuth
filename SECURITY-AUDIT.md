@@ -37,25 +37,27 @@ source of truth for what is currently open vs. fixed.
 
 | ID | Title | Severity | Status | Fixed (date / commit) |
 |----|-------|----------|--------|-----------------------|
-| C1 | Kerberos AP-REQ decrypted but never verified → replay | CRITICAL | OPEN | |
-| C2 | OIDC token endpoint: no client auth; `password`/`client_credentials` open | CRITICAL | OPEN | |
-| C3 | OIDC token introspection unauthenticated | CRITICAL | OPEN | |
-| H1 | Unthrottled brute-force surfaces; `/test-negotiate` LDAP-bind oracle | HIGH | OPEN | |
-| H2 | Refresh-token rotation TOCTOU (non-atomic check-then-mark) | HIGH | OPEN | |
-| H3 | Backend migration drops sessions + revocation blacklist | HIGH | OPEN | |
-| H4 | LDAP bind password stored in plaintext at rest | HIGH | OPEN | |
-| M1 | OIDC id_token `aud` empty on default install | MEDIUM | OPEN | |
-| M2 | JWT `kid` regenerated every restart (JWKS kid churn) | MEDIUM | OPEN | |
-| M3 | Refresh path ignores the `IsUserAccessRevoked` kill-switch | MEDIUM | OPEN | |
-| M4 | Nil-deref: refresh token re-validated with ignored error | MEDIUM | OPEN | |
-| M5 | `Retry-After` header emits garbage for values ≥ 10s | LOW | OPEN | |
-| M6 | OIDC authorization-code flow has no PKCE | MEDIUM | OPEN | |
-| M7 | Login user-enumeration via distinct disabled/locked responses | LOW | OPEN | |
-| M8 | Security headers only on admin UI, not login/API responses | LOW | OPEN | |
+| C1 | Kerberos AP-REQ decrypted but never verified → replay | CRITICAL | FIXED | 2026-05-30 (branch `security-hardening-2026-05-30`) |
+| C2 | OIDC token endpoint: no client auth; `password`/`client_credentials` open | CRITICAL | FIXED | 2026-05-30 |
+| C3 | OIDC token introspection unauthenticated | CRITICAL | FIXED | 2026-05-30 |
+| H1 | Unthrottled brute-force surfaces; `/test-negotiate` LDAP-bind oracle | HIGH | FIXED | 2026-05-30 |
+| H2 | Refresh-token rotation TOCTOU (non-atomic check-then-mark) | HIGH | FIXED | 2026-05-30 |
+| H3 | Backend migration drops sessions + revocation blacklist | HIGH | FIXED | 2026-05-30 |
+| H4 | LDAP bind password stored in plaintext at rest | HIGH | FIXED | 2026-05-30 |
+| M1 | OIDC id_token `aud` empty on default install | MEDIUM | FIXED | 2026-05-30 |
+| M2 | JWT `kid` regenerated every restart (JWKS kid churn) | MEDIUM | FIXED | 2026-05-30 |
+| M3 | Refresh path ignores the `IsUserAccessRevoked` kill-switch | MEDIUM | FIXED | 2026-05-30 |
+| M4 | Nil-deref: refresh token re-validated with ignored error | MEDIUM | FIXED | 2026-05-30 |
+| M5 | `Retry-After` header emits garbage for values ≥ 10s | LOW | FIXED | 2026-05-30 |
+| M6 | OIDC authorization-code flow has no PKCE | MEDIUM | FIXED | 2026-05-30 |
+| M7 | Login user-enumeration via distinct disabled/locked responses | LOW | FIXED | 2026-05-30 |
+| M8 | Security headers only on admin UI, not login/API responses | LOW | FIXED | 2026-05-30 |
+| M9 | Reflected XSS via unescaped `error`/`state`/`nonce`/`scope` on login pages | MEDIUM | FIXED | 2026-05-30 |
 | S1 | Python SDK was unimplemented (README/examples referenced missing code) | MEDIUM | FIXED | 2026-05-30 |
 | S2 | JS/.NET SDK `iss` check hardcoded to base URL (always fails login tokens) | MEDIUM | OPEN | |
 | S3 | Go SDK accepts refresh tokens as access tokens; skips `exp` when absent | MEDIUM | OPEN | |
 | I1 | Single static admin key = entire authz model; actions audited as "admin" | INFO | WONTFIX | by design (documented) |
+| I2 | No tests for `internal/auth` / `internal/config` | INFO | PARTIAL | 2026-05-30 (added auth + crypto + PKCE + consume tests) |
 
 ---
 
@@ -223,8 +225,65 @@ The master admin key is the sole admin trust boundary; all admin actions are aud
 as the literal actor `"admin"` (no per-admin attribution). Deliberate simplicity
 trade-off for a single-app server; documented. Revisit if multi-admin is added.
 
-### I2 — No tests for `internal/auth` / `internal/config` — INFO — OPEN
-The most security-critical packages (JWT, LDAP filter building, password policy,
-config/TLS) have no unit tests. Recommend adding tests alongside the fixes above
-(JWT alg/iss/exp, LDAP filter escaping, refresh rotation atomicity, Kerberos verify).
+### I2 — No tests for `internal/auth` / `internal/config` — INFO — PARTIAL
+The most security-critical packages had no unit tests. **Partially addressed**:
+added `internal/auth/jwt_test.go` (stable kid, alg-confusion rejection, refresh
+family id), `internal/handler/security_fixes_test.go` (PKCE S256/plain, secret
+encrypt/decrypt round-trip), and `internal/store/consume_test.go` (atomic
+single-use refresh). Still missing: LDAP filter-escaping tests, config/TLS tests,
+and an end-to-end Kerberos verify test (needs a fixture keytab).
+
+### M9 — Reflected XSS on the login pages — MEDIUM — FIXED 2026-05-30
+**Where:** `internal/handler/oidc.go` `showOIDCLoginPage` and
+`internal/handler/hosted_login.go` `handleHostedLoginPage`.
+**Mechanism:** the `error` query param (and `state`/`nonce`/`scope`/`redirect_uri`
+on the OIDC page) were interpolated into the HTML response via `fmt.Fprintf`
+without escaping, enabling reflected XSS on an unauthenticated page.
+**Fix:** HTML-escape all reflected values with `html.EscapeString` before
+rendering; URL components of the SSO link remain `url.QueryEscape`d.
+**Breaking:** none.
+
+---
+
+## Remediation Log — Audit Pass 1 (2026-05-30, Claude Opus 4.8)
+
+All changes on branch `security-hardening-2026-05-30`. Build, `go vet`, and the
+test suite are green. Pre-existing non-gofmt formatting was left untouched to keep
+the diff scoped to security.
+
+| ID | Files | Approach |
+|----|-------|----------|
+| C1 | `internal/handler/auth.go` | Replaced decrypt-only paths with `service.VerifyAPREQ` (authenticator + 5-min clock skew + replay cache, PAC decoding disabled) via new `parseAPReqToken`/`verifyAPReq` helpers used by `handleNegotiate`, `handleSSOLogin`, and the diagnostic path. |
+| C2 | `internal/handler/oidc.go` | `requireConfidentialClient` (constant-time secret check) gates `password` + `client_credentials`; disabled unless `AUTH_CLIENT_SECRET` is set. Discovery advertises only enabled grants/auth methods. `authorization_code`/`refresh_token` stay public (hardened by PKCE). |
+| C3 | `internal/handler/oidc.go` | Introspection now requires `requireConfidentialClient`. |
+| H1 | `internal/handler/auth.go`, `handler.go`, `internal/config/config.go` | Per-IP limiter added to `handleNegotiate`/`handleSSOLogin`/`handleNegotiateTestForm`; `/test-negotiate` routes gated behind new `EnableTestEndpoints` (default off, `AUTH_ENABLE_TEST_ENDPOINTS`). |
+| H2 | `internal/store/{interface,bolt,postgres}.go`, `auth.go`, `oidc.go` | New atomic `ConsumeRefreshToken` (Bolt single txn; Postgres `SELECT … FOR UPDATE`) with `ErrRefreshTokenReused`/`ErrRefreshTokenNotFound`; both refresh handlers use it. |
+| H3 | `internal/store/migrate.go` | Migrate `sessions`/`revoked_tokens`/`revoked_users` both directions; PG→Bolt now hard-fails on count mismatch. |
+| H4 | `internal/handler/secrets.go`, `handler.go` | AES-256-GCM at-rest encryption of the LDAP bind password with a `0600` `secret.key` in the data dir (not in the DB, so backups don't carry the key); legacy plaintext auto-migrates on next save. |
+| M1 | `internal/handler/oidc.go` | id_token `aud` uses `oidcClientID()`. |
+| M2 | `internal/auth/jwt.go` | `kid` = SHA-256 thumbprint of the public key (stable across restarts). |
+| M3 | `auth.go`, `oidc.go` | Both refresh paths consult `IsUserAccessRevoked`. |
+| M4 | `internal/auth/jwt.go` (+ callers) | `IssueRefreshToken` returns `familyID`; removed the ignored-error re-parse + nil-deref. Also persists refresh rows before returning the pair. |
+| M5 | `internal/handler/auth.go` | `Retry-After` via `strconv.Itoa`. |
+| M6 | `internal/handler/oidc.go`, `internal/store/types.go`, `auth.go` | Optional S256/plain PKCE: challenge captured at authorize (incl. SSO link + hidden form fields), verified at token exchange. |
+| M7 | `internal/handler/auth.go` | Uniform `invalid credentials` on login failure; real reason stays in the audit log. |
+| M8 | `internal/handler/handler.go` | Global `X-Content-Type-Options: nosniff` + `Referrer-Policy: no-referrer`. |
+| M9 | `oidc.go`, `hosted_login.go` | HTML-escape reflected values on both login pages. |
+
+### Operator notes (behavior changes shipped in this pass)
+- **Kerberos now requires NTP** (server/KDC/client within 5 minutes) and a correct
+  keytab. Validate SSO in staging before production. (C1)
+- **OIDC `password` and `client_credentials` grants are disabled** unless
+  `AUTH_CLIENT_SECRET` is set; when set, callers must present that secret. (C2)
+- **Token introspection requires the client secret.** (C3)
+- **`/test-negotiate` is gone unless `AUTH_ENABLE_TEST_ENDPOINTS=true`.** (H1)
+- **`secret.key` is now a critical file** in the data dir — back it up alongside
+  (but stored separately from) the database. (H4)
+
+### Still open (recommended next pass)
+- **S2** (JS/.NET SDK issuer validation) and **S3** (Go SDK accepts refresh tokens,
+  skips absent `exp`) — client-side hardening.
+- **I2** remainder — LDAP escaping + config tests + Kerberos verify fixture.
+- Not yet done: per-admin attribution (I1, by design), refresh-token/OIDC-code
+  pruning, and `X-Forwarded-Proto` trusted-proxy gating in `oidcBaseURL`.
 </content>
