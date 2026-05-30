@@ -70,7 +70,7 @@ func MigrateToPostgres(source *BoltStore, target *PostgresStore, statusCh chan<-
 	m.status.Progress["_prepare"] = "truncating"
 	m.send()
 	for _, table := range []string{
-		"sa_apps",
+		"sa_app_authz", "sa_apps",
 		"sa_sessions", "sa_oidc_auth_codes", "sa_revoked_tokens", "sa_revoked_users",
 		"sa_audit_log", "sa_refresh_tokens", "sa_user_permissions",
 		"sa_user_roles", "sa_identity_mappings", "sa_config", "sa_users",
@@ -100,6 +100,7 @@ func MigrateToPostgres(source *BoltStore, target *PostgresStore, statusCh chan<-
 		{"revoked_tokens", bucketRevokedTokens},
 		{"revoked_users", bucketRevokedUsers},
 		{"apps", bucketApps},
+		{"app_authz", bucketAppAuthz},
 	}
 
 	sourceCounts := map[string]int64{}
@@ -162,6 +163,7 @@ func MigrateToPostgres(source *BoltStore, target *PostgresStore, statusCh chan<-
 		"revoked_tokens":     "sa_revoked_tokens",
 		"revoked_users":      "sa_revoked_users",
 		"apps":               "sa_apps",
+		"app_authz":          "sa_app_authz",
 	}
 	for boltName, pgTable := range verifyMap {
 		expected := sourceCounts[boltName]
@@ -246,6 +248,9 @@ func migrateKV(target *PostgresStore, table string, k, v []byte) error {
 	case "apps":
 		_, err := target.db.Exec(`INSERT INTO sa_apps (app_id, data) VALUES ($1, $2) ON CONFLICT (app_id) DO UPDATE SET data = $2`, key, v)
 		return err
+	case "app_authz":
+		_, err := target.db.Exec(`INSERT INTO sa_app_authz (app_id, data) VALUES ($1, $2) ON CONFLICT (app_id) DO UPDATE SET data = $2`, key, v)
+		return err
 	default:
 		return nil
 	}
@@ -277,6 +282,7 @@ func MigrateFromPostgres(source *PostgresStore, target *BoltStore, statusCh chan
 		{"revoked_tokens", "sa_revoked_tokens", `SELECT jti, expires_at FROM sa_revoked_tokens`},
 		{"revoked_users", "sa_revoked_users", `SELECT user_guid, expires_at FROM sa_revoked_users`},
 		{"apps", "sa_apps", `SELECT app_id, data FROM sa_apps`},
+		{"app_authz", "sa_app_authz", `SELECT app_id, data FROM sa_app_authz`},
 	}
 
 	// Count totals
@@ -389,6 +395,13 @@ func MigrateFromPostgres(source *PostgresStore, target *BoltStore, statusCh chan
 				rows.Scan(&appID, &data)
 				writeErr = target.db.Update(func(tx *bolt.Tx) error {
 					return tx.Bucket(bucketApps).Put([]byte(appID), data)
+				})
+			case "app_authz":
+				var appID string
+				var data []byte
+				rows.Scan(&appID, &data)
+				writeErr = target.db.Update(func(tx *bolt.Tx) error {
+					return tx.Bucket(bucketAppAuthz).Put([]byte(appID), data)
 				})
 			}
 			if writeErr != nil {

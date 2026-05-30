@@ -29,6 +29,7 @@ var (
 	bucketRevokedUsers     = []byte("revoked_users")
 	bucketSessions         = []byte("sessions")
 	bucketApps             = []byte("apps")
+	bucketAppAuthz         = []byte("app_authz")
 )
 
 // BoltStore implements the Store interface using BoltDB (bbolt).
@@ -121,7 +122,36 @@ func (s *BoltStore) UpdateApp(a *App) error {
 
 func (s *BoltStore) DeleteApp(appID string) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket(bucketApps).Delete([]byte(appID))
+		if err := tx.Bucket(bucketApps).Delete([]byte(appID)); err != nil {
+			return err
+		}
+		// Cascade: drop the app's authorization data too.
+		return tx.Bucket(bucketAppAuthz).Delete([]byte(appID))
+	})
+}
+
+func (s *BoltStore) GetAppAuthz(appID string) (*AppAuthz, error) {
+	authz := &AppAuthz{AppID: appID}
+	err := s.db.View(func(tx *bolt.Tx) error {
+		data := tx.Bucket(bucketAppAuthz).Get([]byte(appID))
+		if data == nil {
+			return nil // none stored — return zero-value
+		}
+		return json.Unmarshal(data, authz)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return authz, nil
+}
+
+func (s *BoltStore) SaveAppAuthz(authz *AppAuthz) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		data, err := json.Marshal(authz)
+		if err != nil {
+			return err
+		}
+		return tx.Bucket(bucketAppAuthz).Put([]byte(authz.AppID), data)
 	})
 }
 
@@ -138,6 +168,7 @@ func (s *BoltStore) init() error {
 			bucketRevokedUsers,
 			bucketSessions,
 			bucketApps,
+			bucketAppAuthz,
 		} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err

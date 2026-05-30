@@ -2,6 +2,7 @@ package handler
 
 import (
 	"fmt"
+	"sort"
 
 	"simpleauth/internal/store"
 )
@@ -54,4 +55,76 @@ func (h *Handler) appAllowsRedirect(a *store.App, redirectURI string) bool {
 		return isAllowedRedirect(a.RedirectURIs, redirectURI)
 	}
 	return isAllowedRedirect(h.getRedirectURIs(), redirectURI)
+}
+
+// userAssignmentKeys returns the identifiers a user may be assigned to an app
+// by: GUID, sAMAccountName, and preferred username.
+func (h *Handler) userAssignmentKeys(user *store.User) []string {
+	keys := make([]string, 0, 3)
+	seen := map[string]bool{}
+	for _, k := range []string{user.GUID, user.SAMAccountName, h.resolvePreferredUsername(user)} {
+		if k != "" && !seen[k] {
+			seen[k] = true
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+// resolveTokenRoles computes the roles + permissions a token for `app` should
+// carry for `user` (v2 M3). When the app has no per-app authorization configured
+// it falls back to the global (v1) roles, so existing deployments keep working
+// until they define per-app authz. `denied` is true when the app has
+// require_assignment set and the user has no direct or group assignment.
+func (h *Handler) resolveTokenRoles(app *store.App, user *store.User) (roles, perms []string, denied bool) {
+	authz, _ := h.store.GetAppAuthz(app.AppID)
+	hasPerApp := authz != nil && (len(authz.Roles) > 0 || len(authz.UserAssignments) > 0 || len(authz.GroupAssignments) > 0)
+
+	if !hasPerApp {
+		// v1 back-compat: the app hasn't defined its own authz yet, so carry the
+		// global roles/permissions exactly as v1 did.
+		gRoles, _ := h.store.GetUserRoles(user.GUID)
+		return gRoles, h.resolveUserPermissions(user.GUID, gRoles), false
+	}
+
+	roleSet := map[string]struct{}{}
+	assigned := false
+	add := func(rs []string) {
+		for _, r := range rs {
+			roleSet[r] = struct{}{}
+			assigned = true
+		}
+	}
+	for _, key := range h.userAssignmentKeys(user) {
+		add(authz.UserAssignments[key])
+	}
+	for _, g := range user.Groups {
+		add(authz.GroupAssignments[g])
+	}
+
+	roles = sortedKeys(roleSet)
+
+	permSet := map[string]struct{}{}
+	for _, r := range roles {
+		for _, p := range authz.RolePermissions[r] {
+			permSet[p] = struct{}{}
+		}
+	}
+	perms = sortedKeys(permSet)
+
+	// require_assignment denies directory users with no assignment. App-local
+	// users (owned by this app) are exempt — handled in M5.
+	if app.RequireAssignment && !assigned {
+		denied = true
+	}
+	return roles, perms, denied
+}
+
+func sortedKeys(m map[string]struct{}) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

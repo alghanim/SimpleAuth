@@ -230,3 +230,42 @@ func (h *Handler) handleRotateAppSecret(w http.ResponseWriter, r *http.Request) 
 	h.audit("app_secret_rotated", "admin", getClientIP(r), map[string]interface{}{"app_id": a.AppID})
 	jsonResp(w, map[string]interface{}{"app_id": a.AppID, "app_secret": secret}, http.StatusOK)
 }
+
+// handleGetAppAuthz returns an app's per-app authorization: its role catalog,
+// role→permission map, and user/group assignments (v2 M3).
+// GET /api/admin/apps/{app_id}/authz
+func (h *Handler) handleGetAppAuthz(w http.ResponseWriter, r *http.Request) {
+	appID := pathParam(r, "app_id")
+	if _, err := h.store.GetApp(appID); err != nil {
+		jsonError(w, "app not found", http.StatusNotFound)
+		return
+	}
+	authz, err := h.store.GetAppAuthz(appID)
+	if err != nil {
+		jsonError(w, "failed to read app authz", http.StatusInternalServerError)
+		return
+	}
+	jsonResp(w, authz, http.StatusOK)
+}
+
+// handleSetAppAuthz replaces an app's per-app authorization.
+// PUT /api/admin/apps/{app_id}/authz
+func (h *Handler) handleSetAppAuthz(w http.ResponseWriter, r *http.Request) {
+	appID := pathParam(r, "app_id")
+	if _, err := h.store.GetApp(appID); err != nil {
+		jsonError(w, "app not found", http.StatusNotFound)
+		return
+	}
+	var authz store.AppAuthz
+	if err := readJSON(r, &authz); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	authz.AppID = appID // path is authoritative
+	if err := h.store.SaveAppAuthz(&authz); err != nil {
+		jsonError(w, "failed to save app authz", http.StatusInternalServerError)
+		return
+	}
+	h.audit("app_authz_updated", "admin", getClientIP(r), map[string]interface{}{"app_id": appID})
+	jsonResp(w, &authz, http.StatusOK)
+}

@@ -93,8 +93,11 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	// Check force password change — still issue tokens but flag the response
 	if finalUser.ForcePasswordChange {
-		roles, _ := h.store.GetUserRoles(finalUser.GUID)
-		perms := h.resolveUserPermissions(finalUser.GUID, roles)
+		roles, perms, denied := h.resolveTokenRoles(app, finalUser)
+		if denied {
+			jsonError(w, "access denied: not assigned to this app", http.StatusForbidden)
+			return
+		}
 		accessToken, refreshToken, expiresIn, err := h.issueTokenPair(finalUser, roles, perms, ldapGroups, app)
 		if err != nil {
 			jsonError(w, "token generation failed", http.StatusInternalServerError)
@@ -304,6 +307,12 @@ func (h *Handler) syncUserFromLDAP(user *store.User, result *auth.LDAPResult) {
 		user.SAMAccountName = result.Username
 		changed = true
 	}
+	// Persist the user's directory groups so per-app group assignments (v2 M3)
+	// can be resolved at token issuance in every flow (not just the live login).
+	if len(result.Groups) > 0 && strings.Join(result.Groups, "\x00") != strings.Join(user.Groups, "\x00") {
+		user.Groups = result.Groups
+		changed = true
+	}
 	if changed {
 		h.store.UpdateUser(user)
 	}
@@ -321,8 +330,11 @@ func (h *Handler) syncUserFromLDAP(user *store.User, result *auth.LDAPResult) {
 }
 
 func (h *Handler) issueTokenResponse(w http.ResponseWriter, user *store.User, groups []string, ip string, app *store.App) {
-	roles, _ := h.store.GetUserRoles(user.GUID)
-	perms := h.resolveUserPermissions(user.GUID, roles)
+	roles, perms, denied := h.resolveTokenRoles(app, user)
+	if denied {
+		jsonError(w, "access denied: not assigned to this app", http.StatusForbidden)
+		return
+	}
 
 	accessToken, refreshToken, expiresIn, err := h.issueTokenPair(user, roles, perms, groups, app)
 	if err != nil {
@@ -881,9 +893,12 @@ func (h *Handler) handleNegotiate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Issue tokens
-	roles, _ := h.store.GetUserRoles(user.GUID)
-	perms := h.resolveUserPermissions(user.GUID, roles)
+	// Issue tokens (per-app roles + require_assignment, v2 M3)
+	roles, perms, denied := h.resolveTokenRoles(app, user)
+	if denied {
+		jsonError(w, "access denied: not assigned to this app", http.StatusForbidden)
+		return
+	}
 	accessToken, refreshToken, expiresIn, err := h.issueTokenPair(user, roles, perms, nil, app)
 	if err != nil {
 		jsonError(w, "token generation failed", http.StatusInternalServerError)
@@ -1146,8 +1161,11 @@ func (h *Handler) handleSSOLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	roles, _ := h.store.GetUserRoles(user.GUID)
-	perms := h.resolveUserPermissions(user.GUID, roles)
+	roles, perms, denied := h.resolveTokenRoles(app, user)
+	if denied {
+		h.redirectToLoginError(w, r, redirectURI, "Access denied: not assigned to this app")
+		return
+	}
 	accessToken, refreshToken, expiresIn, err := h.issueTokenPair(user, roles, perms, ldapGroups, app)
 	if err != nil {
 		h.redirectToLoginError(w, r, redirectURI, "Token generation failed")

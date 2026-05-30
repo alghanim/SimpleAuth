@@ -602,11 +602,14 @@ func (h *Handler) handleOIDCTokenRefresh(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	roles, _ := h.store.GetUserRoles(user.GUID)
-	perms, _ := h.store.GetUserPermissions(user.GUID)
-
-	// Refresh stays bound to the same app (v2): re-stamp the original audience.
+	// Refresh stays bound to the same app (v2): re-stamp the original audience,
+	// and re-check per-app authorization (M3).
 	app, _ := h.resolveApp(storedRT.AppID)
+	roles, perms, denied := h.resolveTokenRoles(app, user)
+	if denied {
+		oidcError(w, "access_denied", "not assigned to this app", http.StatusForbidden)
+		return
+	}
 
 	issuer := h.oidcIssuer(r)
 	accessClaims := h.buildOIDCAccessClaims(user, roles, perms, nil, "", app)
@@ -647,8 +650,11 @@ func (h *Handler) handleOIDCTokenRefresh(w http.ResponseWriter, r *http.Request)
 
 // issueOIDCTokens generates access_token, refresh_token, and id_token for a user.
 func (h *Handler) issueOIDCTokens(w http.ResponseWriter, r *http.Request, user *store.User, scope, nonce string, app *store.App) {
-	roles, _ := h.store.GetUserRoles(user.GUID)
-	perms := h.resolveUserPermissions(user.GUID, roles)
+	roles, perms, denied := h.resolveTokenRoles(app, user)
+	if denied {
+		oidcError(w, "access_denied", "not assigned to this app", http.StatusForbidden)
+		return
+	}
 	issuer := h.oidcIssuer(r)
 	ip := getClientIP(r)
 

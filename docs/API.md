@@ -2556,3 +2556,39 @@ and is rejected by every other app — verify it client-side with the SDK
 
 > Note: in Milestone 2 the `aud` is per-app but the **role contents** are still
 > global. Per-app roles/permissions/assignments arrive in Milestone 3.
+
+### Per-app roles & assignments (Milestone 3)
+
+Each app owns its **roles**, **role→permission map**, and **assignments**
+(which users/groups get which roles). A token's `roles`/`permissions` (and
+`resource_access[app]`) are resolved **per app** at login — so the same user can
+be `admin` in one app and `viewer` (or nothing) in another.
+
+Master admin manages it (app self-service via the app credential arrives in a
+later milestone):
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/admin/apps/{app_id}/authz` | Read the app's roles / role_permissions / assignments. |
+| `PUT` | `/api/admin/apps/{app_id}/authz` | Replace them. |
+
+```bash
+curl -X PUT …/sauth/api/admin/apps/billing/authz \
+  -H "Authorization: Bearer $AUTH_ADMIN_KEY" -H "Content-Type: application/json" \
+  -d '{
+        "roles": ["admin","viewer"],
+        "role_permissions": { "admin": ["invoice:write"], "viewer": ["invoice:read"] },
+        "user_assignments":  { "jsmith": ["viewer"] },
+        "group_assignments": { "Finance": ["admin"] }
+      }'
+```
+
+- **`user_assignments`** is keyed by a user reference — GUID, sAMAccountName, or
+  username (any is matched at login).
+- **`group_assignments`** is keyed by the group identifier captured from the
+  directory at login (sAMAccountName by default; configurable). A user's groups
+  are refreshed on each LDAP/Kerberos login.
+- **`require_assignment`** (per app): when true, a directory user with no direct
+  or group assignment is **denied** a token (`403` / `access_denied`).
+- **Back-compat:** an app with no per-app authz defined falls back to the global
+  (v1) roles, so existing single-app deployments are unaffected until they opt in.

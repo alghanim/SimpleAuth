@@ -27,6 +27,24 @@ type User struct {
 	PasswordHistory     []string   `json:"password_history,omitempty"`
 	FailedLoginAttempts int        `json:"failed_login_attempts,omitempty"`
 	LockedUntil         *time.Time `json:"locked_until,omitempty"`
+
+	// Groups holds the user's last-known directory group identifiers (refreshed
+	// on each LDAP/Kerberos login). Used to resolve per-app group assignments at
+	// token issuance (v2). Empty for local-only users.
+	Groups []string `json:"groups,omitempty"`
+}
+
+// AppAuthz holds an app's per-app authorization data (v2): its role catalog,
+// role→permission map, and user/group assignments. Keyed by app_id, managed by
+// the app itself (or the master admin). All maps are role-lists keyed by the
+// subject (user reference) or group identifier (sAMAccountName by default).
+type AppAuthz struct {
+	AppID            string              `json:"app_id"`
+	Roles            []string            `json:"roles,omitempty"`
+	Permissions      []string            `json:"permissions,omitempty"`
+	RolePermissions  map[string][]string `json:"role_permissions,omitempty"`
+	UserAssignments  map[string][]string `json:"user_assignments,omitempty"`
+	GroupAssignments map[string][]string `json:"group_assignments,omitempty"`
 }
 
 type LDAPConfig struct {

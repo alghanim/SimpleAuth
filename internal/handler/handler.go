@@ -235,6 +235,8 @@ func (h *Handler) registerRoutes(uiFS fs.FS) {
 	h.mux.HandleFunc("PUT /api/admin/apps/{app_id}", h.requireMasterAdmin(h.handleUpdateApp))
 	h.mux.HandleFunc("DELETE /api/admin/apps/{app_id}", h.requireMasterAdmin(h.handleDeleteApp))
 	h.mux.HandleFunc("POST /api/admin/apps/{app_id}/rotate-secret", h.requireMasterAdmin(h.handleRotateAppSecret))
+	h.mux.HandleFunc("GET /api/admin/apps/{app_id}/authz", h.requireMasterAdmin(h.handleGetAppAuthz))
+	h.mux.HandleFunc("PUT /api/admin/apps/{app_id}/authz", h.requireMasterAdmin(h.handleSetAppAuthz))
 
 	// Admin: Bootstrap
 	h.mux.HandleFunc("POST /api/admin/bootstrap", h.requireMasterAdmin(h.handleBootstrap))

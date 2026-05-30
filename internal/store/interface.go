@@ -39,6 +39,10 @@ type Store interface {
 	ListApps() ([]*App, error)
 	UpdateApp(a *App) error
 	DeleteApp(appID string) error
+	// App authorization (per-app roles/permissions/assignments). GetAppAuthz
+	// returns a non-nil zero-value AppAuthz when none is stored.
+	GetAppAuthz(appID string) (*AppAuthz, error)
+	SaveAppAuthz(authz *AppAuthz) error
 
 	// LDAP Config
 	GetLDAPConfig() (*LDAPConfig, error)

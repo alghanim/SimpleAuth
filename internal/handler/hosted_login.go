@@ -182,9 +182,12 @@ func (h *Handler) handleHostedLoginSubmit(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Issue tokens
-	roles, _ := h.store.GetUserRoles(user.GUID)
-	perms := h.resolveUserPermissions(user.GUID, roles)
+	// Issue tokens (per-app roles + require_assignment, v2 M3)
+	roles, perms, denied := h.resolveTokenRoles(app, user)
+	if denied {
+		h.redirectToLoginError(w, r, redirectURI, "Access denied: not assigned to this app")
+		return
+	}
 	accessToken, refreshToken, expiresIn, err := h.issueTokenPair(user, roles, perms, ldapGroups, app)
 	if err != nil {
 		h.redirectToLoginError(w, r, redirectURI, "Token generation failed")
@@ -228,8 +231,11 @@ func (h *Handler) completeHostedLoginWithSession(w http.ResponseWriter, r *http.
 		h.redirectToLoginError(w, r, redirectURI, "Unknown app")
 		return
 	}
-	roles, _ := h.store.GetUserRoles(user.GUID)
-	perms := h.resolveUserPermissions(user.GUID, roles)
+	roles, perms, denied := h.resolveTokenRoles(app, user)
+	if denied {
+		h.redirectToLoginError(w, r, redirectURI, "Access denied: not assigned to this app")
+		return
+	}
 	accessToken, refreshToken, expiresIn, err := h.issueTokenPair(user, roles, perms, nil, app)
 	if err != nil {
 		h.redirectToLoginError(w, r, redirectURI, "Token generation failed")

@@ -108,6 +108,10 @@ func (s *PostgresStore) migrate() error {
 		app_id TEXT PRIMARY KEY,
 		data JSONB NOT NULL
 	);
+	CREATE TABLE IF NOT EXISTS sa_app_authz (
+		app_id TEXT PRIMARY KEY,
+		data JSONB NOT NULL
+	);
 	`
 	_, err := s.db.Exec(schema)
 	return err
@@ -174,7 +178,30 @@ func (s *PostgresStore) UpdateApp(a *App) error {
 }
 
 func (s *PostgresStore) DeleteApp(appID string) error {
-	_, err := s.db.Exec(`DELETE FROM sa_apps WHERE app_id = $1`, appID)
+	if _, err := s.db.Exec(`DELETE FROM sa_apps WHERE app_id = $1`, appID); err != nil {
+		return err
+	}
+	// Cascade: drop the app's authorization data too.
+	_, err := s.db.Exec(`DELETE FROM sa_app_authz WHERE app_id = $1`, appID)
+	return err
+}
+
+func (s *PostgresStore) GetAppAuthz(appID string) (*AppAuthz, error) {
+	authz := &AppAuthz{AppID: appID}
+	var data []byte
+	err := s.db.QueryRow(`SELECT data FROM sa_app_authz WHERE app_id = $1`, appID).Scan(&data)
+	if err == sql.ErrNoRows {
+		return authz, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return authz, json.Unmarshal(data, authz)
+}
+
+func (s *PostgresStore) SaveAppAuthz(authz *AppAuthz) error {
+	data, _ := json.Marshal(authz)
+	_, err := s.db.Exec(`INSERT INTO sa_app_authz (app_id, data) VALUES ($1, $2) ON CONFLICT (app_id) DO UPDATE SET data = $2`, authz.AppID, data)
 	return err
 }
 
@@ -182,6 +209,7 @@ func (s *PostgresStore) DeleteApp(appID string) error {
 // a clean target. Do NOT call this on a running Postgres store with live data.
 func (s *PostgresStore) ResetSchema() error {
 	drops := `
+	DROP TABLE IF EXISTS sa_app_authz CASCADE;
 	DROP TABLE IF EXISTS sa_apps CASCADE;
 	DROP TABLE IF EXISTS sa_sessions CASCADE;
 	DROP TABLE IF EXISTS sa_revoked_users CASCADE;
