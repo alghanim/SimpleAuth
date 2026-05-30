@@ -20,11 +20,12 @@ from __future__ import annotations
 from .client import SimpleAuth
 from .errors import (
     AdminError,
+    AppError,
     AuthenticationError,
     SimpleAuthError,
     TokenVerificationError,
 )
-from .models import TokenResponse, User, UserInfo
+from .models import AppAuthz, TokenResponse, User, UserInfo
 
 __version__ = "1.0.0"
 
@@ -33,9 +34,11 @@ __all__ = [
     "TokenResponse",
     "User",
     "UserInfo",
+    "AppAuthz",
     "SimpleAuthError",
     "AuthenticationError",
     "TokenVerificationError",
     "AdminError",
+    "AppError",
     "__version__",
 ]

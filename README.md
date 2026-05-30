@@ -434,6 +434,20 @@ Full management dashboard at `/sauth/admin` with dark mode:
 - **Linux SSO script** -- auto-generated bash script configures krb5.conf + all major browsers
 - **Backup/restore** -- live BoltDB snapshots via API
 
+## Per-App Authorization (v2)
+
+> **Status: in development on the `v2` branch.** Full design: [docs/V2-DESIGN.md](docs/V2-DESIGN.md).
+
+One SimpleAuth, one shared login, **many apps — each with its own authorization**. A user logs in once and moves between apps without re-typing credentials, but **a token minted for app A is rejected by app B**, and each app owns its own roles, permissions, and allowed users. This is the Azure AD / Entra model (one directory, many app registrations, per-app roles + assignment, audience-scoped tokens) — *not* multi-realm isolation.
+
+- **Apps registry** — the root admin registers apps (`app_id` + `app_secret`); existing single-app deployments auto-migrate to a default app, unchanged.
+- **Audience-scoped tokens** — every token carries `aud` = the app; SDKs reject foreign-app tokens via the `audience` option.
+- **Per-app roles & assignments** — roles resolved per app at login from direct user assignments ∪ AD-group assignments (by `sAMAccountName`). `require_assignment` (per app) denies unassigned users.
+- **App self-service** — each app manages its *own* roles/assignments with its `app_id`/`app_secret` (HTTP Basic or a management token) and an idempotent `POST /api/app/bootstrap` (authz-as-code on every deploy). No master key needed.
+- **App-local users** — apps can own local users that aren't in your directory (e.g. customer portals); scoped to the app, never cross-app SSO-shared.
+
+A developer's whole integration becomes: get `app_id`/`app_secret` from the admin → `bootstrap` roles on deploy → point the SDK at SimpleAuth with `audience` set to the app → `verify()`. All four SDKs ship app-management helpers (`appBootstrap`, `getAppAuthz`/`setAppAuthz`, local-user CRUD); see [examples/](examples/) `app-integration`. API reference: the "Apps (v2)" sections of [docs/API.md](docs/API.md).
+
 ## OIDC Endpoints
 
 SimpleAuth is a standard OpenID Connect provider. Use any OIDC client library.

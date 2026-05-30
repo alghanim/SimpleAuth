@@ -112,6 +112,65 @@ class User:
 
 
 @dataclass
+class AppAuthz:
+    """An app's per-app authorization, as returned by ``GET /api/app/authz``.
+
+    Mirrors the JSON body of the v2 app self-management ``authz`` endpoint. The
+    same shape (minus ``app_id``) is accepted by ``PUT /api/app/authz`` and is
+    produced by :meth:`to_dict` for round-tripping.
+
+    Attributes:
+        app_id: The calling app's id (read-only; ignored on PUT).
+        roles: Roles defined inside this app.
+        permissions: Permissions defined inside this app.
+        role_permissions: Map of role -> the permissions it grants.
+        user_assignments: Map of a user reference (GUID, sAMAccountName, or
+            username) -> the roles assigned to that user in this app.
+        group_assignments: Map of a group identifier (sAMAccountName by default)
+            -> the roles assigned to members of that group in this app.
+    """
+
+    app_id: str = ""
+    roles: List[str] = field(default_factory=list)
+    permissions: List[str] = field(default_factory=list)
+    role_permissions: Dict[str, List[str]] = field(default_factory=dict)
+    user_assignments: Dict[str, List[str]] = field(default_factory=dict)
+    group_assignments: Dict[str, List[str]] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "AppAuthz":
+        """Build an :class:`AppAuthz` from a decoded JSON mapping."""
+
+        def _str_map(value: Any) -> Dict[str, List[str]]:
+            if not isinstance(value, Mapping):
+                return {}
+            return {str(k): list(v or []) for k, v in value.items()}
+
+        return cls(
+            app_id=data.get("app_id", "") or "",
+            roles=list(data.get("roles") or []),
+            permissions=list(data.get("permissions") or []),
+            role_permissions=_str_map(data.get("role_permissions")),
+            user_assignments=_str_map(data.get("user_assignments")),
+            group_assignments=_str_map(data.get("group_assignments")),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to the JSON shape accepted by ``PUT /api/app/authz``.
+
+        ``app_id`` is intentionally omitted: the server derives it from the
+        credential and ignores any value in the body.
+        """
+        return {
+            "roles": list(self.roles),
+            "permissions": list(self.permissions),
+            "role_permissions": {k: list(v) for k, v in self.role_permissions.items()},
+            "user_assignments": {k: list(v) for k, v in self.user_assignments.items()},
+            "group_assignments": {k: list(v) for k, v in self.group_assignments.items()},
+        }
+
+
+@dataclass
 class UserInfo(dict):
     """Response from the ``/api/auth/userinfo`` endpoint.
 
@@ -141,4 +200,4 @@ class UserInfo(dict):
         return self.get("preferred_username")
 
 
-__all__ = ["TokenResponse", "User", "UserInfo"]
+__all__ = ["TokenResponse", "User", "UserInfo", "AppAuthz"]

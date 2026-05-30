@@ -177,6 +177,68 @@ await auth.setUserPermissions('user-guid', ['read', 'write', 'delete']);
 
 > **Note:** Roles and permissions must be defined in SimpleAuth before they can be assigned to users. Use the admin API to define roles (`PUT /api/admin/role-permissions`) and permissions (`PUT /api/admin/permissions`) first, or define them in the Admin UI under Roles & Permissions.
 
+## v2: Per-App Management
+
+In v2, an **app** is an OAuth client identified by `app_id` + `app_secret`. An app self-manages its own authorization via the `/api/app/*` endpoints, authenticated with **HTTP Basic** (`app_id:app_secret`) — no master admin key required. The `app_id` is taken from the credential, so an app can only ever read or write its own scope.
+
+Construct the client with `appId`, `appSecret`, and `audience` (set `audience` to the app so `verify()` rejects tokens minted for other apps):
+
+```ts
+const auth = new SimpleAuth({
+  url: 'https://auth.example.com/sauth',
+  appId: process.env.SIMPLEAUTH_APP_ID,
+  appSecret: process.env.SIMPLEAUTH_APP_SECRET,
+  audience: process.env.SIMPLEAUTH_APP_ID, // verify() rejects other apps' tokens
+});
+```
+
+### Bootstrap (authz-as-code)
+
+`appBootstrap` is **idempotent** — call it on startup / every deploy to converge the app's roles, permissions, and assignments to the declared state:
+
+```ts
+await auth.appBootstrap({
+  roles: ['admin', 'viewer'],
+  permissions: ['invoice:read', 'invoice:write'],
+  role_permissions: {
+    admin: ['invoice:read', 'invoice:write'],
+    viewer: ['invoice:read'],
+  },
+  assignments: [
+    { group: 'Finance', roles: ['admin'] },   // directory group -> roles
+    { user: 'jsmith', roles: ['viewer'] },     // directory user  -> roles
+  ],
+});
+```
+
+### Read / Replace Authz & Settings
+
+```ts
+const authz = await auth.getAppAuthz();   // { app_id, roles, permissions, role_permissions, user_assignments, group_assignments }
+await auth.setAppAuthz(authz);            // PUT — replaces the app's authz
+
+const settings = await auth.appSettings(); // read-only policy view (no secret)
+```
+
+### App-Local Users
+
+When the app has `allow_local_users` enabled, it can own users that aren't in your directory (e.g. a customer portal). They authenticate locally and only ever receive `aud=<the app>` tokens.
+
+```ts
+const user = await auth.createLocalUser({
+  username: 'customer1',
+  password: '…',
+  display_name: 'Customer One',
+  roles: ['viewer'],
+});
+
+const users = await auth.listLocalUsers();
+await auth.setLocalUserPassword(user.guid, 'new-password');
+await auth.deleteLocalUser(user.guid);
+```
+
+All app-management methods throw `SimpleAuthError` if `appId`/`appSecret` are not configured. See [`examples/js/app-integration.ts`](../../examples/js/app-integration.ts) for a full integration.
+
 ## Error Handling
 
 All methods throw `SimpleAuthError` on failure:
@@ -202,6 +264,10 @@ try {
 |----------------|----------|----------|-----------------|------------------------------------------|
 | `url`          | `string` | Yes      | --              | SimpleAuth server URL (include `/sauth` base path, e.g. `https://auth.example.com/sauth`) |
 | `adminKey`     | `string` | No       | --              | Admin key for admin API operations (sent as Bearer token) |
+| `appId`        | `string` | No       | --              | App (OAuth client) id for v2 per-app management (`/api/app/*`), sent with `appSecret` as HTTP Basic |
+| `appSecret`    | `string` | No       | --              | App secret paired with `appId` (credential — do not embed in browser code) |
+| `audience`     | `string` | No       | --              | If set, `verify()` requires this value in the token's `aud` claim (set to the app to reject other apps' tokens) |
+| `expectedIssuer` | `string` | No     | --              | If set, `verify()` requires the token's `iss` claim to equal this value |
 
 ## Browser Usage
 

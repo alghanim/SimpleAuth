@@ -20,6 +20,7 @@ public class SimpleAuthClient : IDisposable
     private string CertsUrl => $"{BaseUrl}/.well-known/jwks.json";
     private string UserInfoUrl => $"{BaseUrl}/api/auth/userinfo";
     private string AdminUrl => $"{BaseUrl}/api/admin";
+    private string AppUrl => $"{BaseUrl}/api/app";
 
     /// <summary>Admin key for Bearer auth on admin endpoints.</summary>
     private string EffectiveAdminKey => _options.AdminKey;
@@ -321,6 +322,154 @@ public class SimpleAuthClient : IDisposable
             var json = await response.Content.ReadAsStringAsync();
             throw new SimpleAuthException($"Admin request failed ({response.StatusCode}): {json}");
         }
+    }
+
+    // ── App self-management (v2 — per-app authorization) ─────────────────
+    //
+    // An "app" is an OAuth client (app_id + app_secret) that self-manages its own
+    // authorization under /api/app/*, authenticated with HTTP Basic
+    // app_id:app_secret. The app_id is derived from the credential by the server —
+    // an app can only ever read or write its own scope. Set Options.Audience to
+    // the app id so VerifyAsync rejects tokens minted for other apps.
+
+    /// <summary>
+    /// Declares the calling app's roles, permissions, role→permission map, and
+    /// assignments (authz-as-code). Idempotent and safe to call on every deploy.
+    /// <c>POST /api/app/bootstrap</c>.
+    /// </summary>
+    public async Task<BootstrapResult> AppBootstrapAsync(BootstrapSpec spec)
+    {
+        if (spec is null) throw new ArgumentNullException(nameof(spec));
+        var json = await AppRequestAsync(HttpMethod.Post, $"{AppUrl}/bootstrap", spec);
+        return JsonSerializer.Deserialize<BootstrapResult>(json)
+            ?? throw new SimpleAuthException("Empty bootstrap response.");
+    }
+
+    /// <summary>
+    /// Returns the calling app's current authorization (roles, permissions,
+    /// role→permission map, and assignments). <c>GET /api/app/authz</c>.
+    /// </summary>
+    public async Task<AppAuthz> GetAppAuthzAsync()
+    {
+        var json = await AppRequestAsync(HttpMethod.Get, $"{AppUrl}/authz", null);
+        return JsonSerializer.Deserialize<AppAuthz>(json)
+            ?? throw new SimpleAuthException("Empty authz response.");
+    }
+
+    /// <summary>
+    /// Replaces the calling app's authorization wholesale. The server uses the
+    /// credential's app_id authoritatively, so <see cref="AppAuthz.AppId"/> may be
+    /// left empty. <c>PUT /api/app/authz</c>.
+    /// </summary>
+    public async Task<AppAuthz> SetAppAuthzAsync(AppAuthz authz)
+    {
+        if (authz is null) throw new ArgumentNullException(nameof(authz));
+        var json = await AppRequestAsync(HttpMethod.Put, $"{AppUrl}/authz", authz);
+        return JsonSerializer.Deserialize<AppAuthz>(json)
+            ?? throw new SimpleAuthException("Empty authz response.");
+    }
+
+    /// <summary>Returns the calling app's own settings (no secret). <c>GET /api/app/settings</c>.</summary>
+    public async Task<AppSettings> AppSettingsAsync()
+    {
+        var json = await AppRequestAsync(HttpMethod.Get, $"{AppUrl}/settings", null);
+        return JsonSerializer.Deserialize<AppSettings>(json)
+            ?? throw new SimpleAuthException("Empty settings response.");
+    }
+
+    /// <summary>
+    /// Provisions an app-local user owned by the calling app. Requires the app's
+    /// <c>allow_local_users</c> flag. <paramref name="roles"/>, if non-empty, are
+    /// recorded as the app's assignment for that username;
+    /// <paramref name="displayName"/> and <paramref name="email"/> are optional
+    /// (pass null). <c>POST /api/app/users</c>.
+    /// </summary>
+    public async Task<LocalUser> CreateLocalUserAsync(
+        string username,
+        string password,
+        string? displayName = null,
+        string? email = null,
+        List<string>? roles = null)
+    {
+        var payload = new Dictionary<string, object>
+        {
+            ["username"] = username,
+            ["password"] = password,
+        };
+        if (!string.IsNullOrEmpty(displayName)) payload["display_name"] = displayName;
+        if (!string.IsNullOrEmpty(email)) payload["email"] = email;
+        if (roles is { Count: > 0 }) payload["roles"] = roles;
+
+        var json = await AppRequestAsync(HttpMethod.Post, $"{AppUrl}/users", payload);
+        return JsonSerializer.Deserialize<LocalUser>(json)
+            ?? throw new SimpleAuthException("Empty create-user response.");
+    }
+
+    /// <summary>Lists the calling app's local users. <c>GET /api/app/users</c>.</summary>
+    public async Task<List<LocalUser>> ListLocalUsersAsync()
+    {
+        var json = await AppRequestAsync(HttpMethod.Get, $"{AppUrl}/users", null);
+        var wrapper = JsonSerializer.Deserialize<LocalUserList>(json);
+        return wrapper?.Users ?? [];
+    }
+
+    /// <summary>
+    /// Deletes an app-local user owned by the calling app.
+    /// <c>DELETE /api/app/users/{guid}</c>.
+    /// </summary>
+    public async Task DeleteLocalUserAsync(string guid)
+    {
+        await AppRequestAsync(HttpMethod.Delete, $"{AppUrl}/users/{guid}", null);
+    }
+
+    /// <summary>
+    /// Resets an app-local user's password.
+    /// <c>PUT /api/app/users/{guid}/password</c>.
+    /// </summary>
+    public async Task SetLocalUserPasswordAsync(string guid, string password)
+    {
+        await AppRequestAsync(HttpMethod.Put, $"{AppUrl}/users/{guid}/password",
+            new { password });
+    }
+
+    /// <summary>
+    /// Performs an authenticated request against /api/app/*. Mirrors the admin
+    /// helpers but authenticates with HTTP Basic app_id:app_secret instead of a
+    /// Bearer admin key. Throws if AppId/AppSecret are unset.
+    /// </summary>
+    private async Task<string> AppRequestAsync(HttpMethod method, string url, object? payload)
+    {
+        if (string.IsNullOrWhiteSpace(_options.AppId) || string.IsNullOrWhiteSpace(_options.AppSecret))
+            throw new SimpleAuthException(
+                "AppId and AppSecret are required for app-management operations.");
+
+        using var request = new HttpRequestMessage(method, url);
+
+        var credentials = Convert.ToBase64String(
+            Encoding.UTF8.GetBytes($"{_options.AppId}:{_options.AppSecret}"));
+        request.Headers.Authorization = new AuthenticationHeaderValue("Basic", credentials);
+
+        if (payload is not null)
+        {
+            request.Content = new StringContent(
+                JsonSerializer.Serialize(payload),
+                Encoding.UTF8,
+                "application/json");
+        }
+
+        using var response = await _http.SendAsync(request);
+        var json = await response.Content.ReadAsStringAsync();
+
+        if (!response.IsSuccessStatusCode)
+            throw new SimpleAuthException($"App request failed ({response.StatusCode}): {json}");
+
+        return json;
+    }
+
+    private sealed class LocalUserList
+    {
+        [JsonPropertyName("users")]
+        public List<LocalUser> Users { get; set; } = [];
     }
 
     // ── Base64url helpers ───────────────────────────────────────────────

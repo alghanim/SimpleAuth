@@ -155,6 +155,61 @@ err = client.SetUserPermissions(ctx, userGUID, []string{"read", "write"})
 
 > **Note:** Roles and permissions must be defined in SimpleAuth before they can be assigned to users. Use the admin API to define roles (`PUT /api/admin/role-permissions`) and permissions (`PUT /api/admin/permissions`) first, or define them in the Admin UI under Roles & Permissions.
 
+## v2: per-app management
+
+In v2 an **app** is an OAuth client (`app_id` + `app_secret`) that owns its own roles, permissions, and assignments. Apps self-manage their authorization under `/api/app/*` using **HTTP Basic** `app_id:app_secret` — no admin key, and an app can only ever touch its own scope (the `app_id` is derived from the credential server-side).
+
+A token minted for app A is useless on app B. Set `Audience` to the app's `app_id`/audience so `Verify` rejects tokens issued for any other app:
+
+```go
+client := sa.New(sa.Options{
+    URL:       "https://auth.example.com/sauth",
+    AppID:     "billing",
+    AppSecret: os.Getenv("SIMPLEAUTH_APP_SECRET"), // never hardcode
+    Audience:  "billing",                          // reject tokens for other apps
+})
+```
+
+### Bootstrap (authz-as-code)
+
+`AppBootstrap` declares this app's roles, permissions, the role→permission map, and assignments. It is idempotent and safe to call on every deploy:
+
+```go
+res, err := client.AppBootstrap(ctx, sa.BootstrapSpec{
+    Roles:       []string{"admin", "viewer"},
+    Permissions: []string{"invoice:read", "invoice:write"},
+    RolePermissions: map[string][]string{
+        "admin":  {"invoice:read", "invoice:write"},
+        "viewer": {"invoice:read"},
+    },
+    Assignments: []sa.Assignment{
+        {Group: "Finance", Roles: []string{"admin"}},  // AD group -> admin
+        {User: "jsmith", Roles: []string{"viewer"}},   // directory user -> viewer
+    },
+})
+```
+
+### Read / replace authz and read settings
+
+```go
+authz, err := client.GetAppAuthz(ctx)              // GET  /api/app/authz
+authz, err = client.SetAppAuthz(ctx, *authz)       // PUT  /api/app/authz (replace; AppID may be empty)
+settings, err := client.AppSettings(ctx)           // GET  /api/app/settings
+```
+
+### App-local users
+
+If the app has `allow_local_users` set, it can provision its own users (e.g. a customer portal). App-local usernames are unique per app, only ever get `aud=<this app>` tokens, and are exempt from `require_assignment`:
+
+```go
+u, err := client.CreateLocalUser(ctx, "customer1", "S3cret!", "Customer One", "", []string{"viewer"})
+users, err := client.ListLocalUsers(ctx)
+err = client.SetLocalUserPassword(ctx, u.GUID, "newS3cret!")
+err = client.DeleteLocalUser(ctx, u.GUID)
+```
+
+All app-management methods return a clear error if `AppID`/`AppSecret` are unset. See [`examples/go/app-integration`](../../examples/go/app-integration) for a full, self-contained example.
+
 ## Self-signed certificates
 
 For development environments with self-signed TLS certificates:
@@ -205,4 +260,8 @@ mux.Handle("/auth/", http.StripPrefix("/auth", sa.Handler()))
 |---|---|---|
 | `URL` | SimpleAuth server base URL (include `/sauth` base path, e.g. `https://auth.example.com/sauth`) | *(required)* |
 | `AdminKey` | Admin key for admin API operations (sent as Bearer token) | `""` |
+| `AppID` | App's `app_id` for v2 per-app management (sent as HTTP Basic username to `/api/app/*`) | `""` |
+| `AppSecret` | App's `app_secret` for v2 per-app management (HTTP Basic password) | `""` |
+| `ExpectedIssuer` | Required `iss` claim on verified tokens (empty = skip check) | `""` |
+| `Audience` | Required `aud` claim on verified tokens — set to the app's `app_id` (empty = skip check) | `""` |
 | `InsecureSkipVerify` | Skip TLS certificate verification | `false` |
