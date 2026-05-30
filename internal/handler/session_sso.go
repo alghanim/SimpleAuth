@@ -22,6 +22,11 @@ func (h *Handler) issueSessionCookie(w http.ResponseWriter, r *http.Request, use
 	if !h.getSessionSSOEnabled() {
 		return
 	}
+	// App-local users are owned by a single app and are never shared via
+	// cross-app SSO (v2 M5).
+	if u, err := h.store.ResolveUser(userGUID); err == nil && u.OwnerAppID != "" {
+		return
+	}
 
 	idBytes := make([]byte, 32)
 	if _, err := rand.Read(idBytes); err != nil {

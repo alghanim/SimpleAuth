@@ -2,6 +2,7 @@ package handler
 
 import (
 	"net/http"
+	"time"
 
 	"simpleauth/internal/auth"
 	"simpleauth/internal/store"
@@ -166,4 +167,140 @@ func (h *Handler) handleAppSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonResp(w, appView(app), http.StatusOK)
+}
+
+// --- App-local users (v2 M5) ---
+
+// handleCreateLocalUser provisions an app-local user owned by the calling app
+// (e.g. a customer not in the directory). POST /api/app/users — requires the
+// app's allow_local_users flag. Roles, if given, are recorded as the app's own
+// assignment for that username.
+func (h *Handler) handleCreateLocalUser(w http.ResponseWriter, r *http.Request) {
+	appID := appIDFromContext(r)
+	app, err := h.store.GetApp(appID)
+	if err != nil {
+		jsonError(w, "app not found", http.StatusNotFound)
+		return
+	}
+	if !app.AllowLocalUsers {
+		jsonError(w, "this app does not allow local users (set allow_local_users)", http.StatusForbidden)
+		return
+	}
+	var req struct {
+		Username    string   `json:"username"`
+		Password    string   `json:"password"`
+		DisplayName string   `json:"display_name"`
+		Email       string   `json:"email"`
+		Roles       []string `json:"roles"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.Username == "" || req.Password == "" {
+		jsonError(w, "username and password required", http.StatusBadRequest)
+		return
+	}
+	mapKey := "applocal:" + appID
+	if existing, err := h.store.ResolveMapping(mapKey, req.Username); err == nil && existing != "" {
+		jsonError(w, "username already exists for this app", http.StatusConflict)
+		return
+	}
+	hash, err := auth.HashPassword(req.Password)
+	if err != nil {
+		jsonError(w, "failed to hash password", http.StatusInternalServerError)
+		return
+	}
+	u := &store.User{
+		OwnerAppID:   appID,
+		DisplayName:  req.DisplayName,
+		Email:        req.Email,
+		PasswordHash: hash,
+		CreatedAt:    time.Now().UTC(),
+	}
+	if err := h.store.CreateUser(u); err != nil {
+		jsonError(w, "failed to create user", http.StatusInternalServerError)
+		return
+	}
+	h.store.SetIdentityMapping(mapKey, req.Username, u.GUID)
+	if len(req.Roles) > 0 {
+		authz, _ := h.store.GetAppAuthz(appID)
+		if authz.UserAssignments == nil {
+			authz.UserAssignments = map[string][]string{}
+		}
+		authz.UserAssignments[req.Username] = req.Roles
+		h.store.SaveAppAuthz(authz)
+	}
+	h.audit("app_local_user_created", appID, getClientIP(r), map[string]interface{}{"app_id": appID, "username": req.Username})
+	jsonResp(w, map[string]interface{}{"guid": u.GUID, "username": req.Username, "owner_app_id": appID}, http.StatusCreated)
+}
+
+// handleListLocalUsers lists the calling app's local users. GET /api/app/users
+func (h *Handler) handleListLocalUsers(w http.ResponseWriter, r *http.Request) {
+	appID := appIDFromContext(r)
+	all, err := h.store.ListUsers()
+	if err != nil {
+		jsonError(w, "failed to list users", http.StatusInternalServerError)
+		return
+	}
+	out := make([]map[string]interface{}, 0)
+	for _, u := range all {
+		if u.OwnerAppID != appID {
+			continue
+		}
+		out = append(out, map[string]interface{}{
+			"guid": u.GUID, "display_name": u.DisplayName, "email": u.Email,
+			"disabled": u.Disabled, "created_at": u.CreatedAt,
+		})
+	}
+	jsonResp(w, map[string]interface{}{"users": out}, http.StatusOK)
+}
+
+// handleDeleteLocalUser removes an app-local user owned by the calling app.
+// DELETE /api/app/users/{guid}
+func (h *Handler) handleDeleteLocalUser(w http.ResponseWriter, r *http.Request) {
+	appID := appIDFromContext(r)
+	guid := pathParam(r, "guid")
+	u, err := h.store.GetUser(guid)
+	if err != nil || u.OwnerAppID != appID {
+		jsonError(w, "user not found", http.StatusNotFound)
+		return
+	}
+	if err := h.store.DeleteUser(guid); err != nil {
+		jsonError(w, "failed to delete user", http.StatusInternalServerError)
+		return
+	}
+	h.audit("app_local_user_deleted", appID, getClientIP(r), map[string]interface{}{"app_id": appID, "guid": guid})
+	jsonResp(w, map[string]string{"status": "deleted"}, http.StatusOK)
+}
+
+// handleSetLocalUserPassword resets an app-local user's password.
+// PUT /api/app/users/{guid}/password
+func (h *Handler) handleSetLocalUserPassword(w http.ResponseWriter, r *http.Request) {
+	appID := appIDFromContext(r)
+	guid := pathParam(r, "guid")
+	u, err := h.store.GetUser(guid)
+	if err != nil || u.OwnerAppID != appID {
+		jsonError(w, "user not found", http.StatusNotFound)
+		return
+	}
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := readJSON(r, &req); err != nil || req.Password == "" {
+		jsonError(w, "password required", http.StatusBadRequest)
+		return
+	}
+	hash, err := auth.HashPassword(req.Password)
+	if err != nil {
+		jsonError(w, "failed to hash password", http.StatusInternalServerError)
+		return
+	}
+	u.PasswordHash = hash
+	if err := h.store.UpdateUser(u); err != nil {
+		jsonError(w, "failed to update password", http.StatusInternalServerError)
+		return
+	}
+	h.audit("app_local_user_password_reset", appID, getClientIP(r), map[string]interface{}{"app_id": appID, "guid": guid})
+	jsonResp(w, map[string]string{"status": "password updated"}, http.StatusOK)
 }

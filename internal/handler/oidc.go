@@ -212,7 +212,7 @@ func (h *Handler) handleOIDCAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userGUID, _, err := h.authenticateUser(username, password)
+	userGUID, _, err := h.authenticateUser(username, password, app)
 	if err != nil {
 		h.audit("login_failed", "", ip, map[string]interface{}{
 			"username": username, "reason": err.Error(), "flow": "oidc",
@@ -474,14 +474,20 @@ func (h *Handler) handleOIDCTokenPassword(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	app, err := h.resolveApp(r.FormValue("client_id"))
+	if err != nil {
+		oidcError(w, "invalid_client", "unknown client", http.StatusBadRequest)
+		return
+	}
+
 	ip := getClientIP(r)
 	if !h.loginLimiter.allow(ip) {
 		oidcError(w, "invalid_request", "too many login attempts", http.StatusTooManyRequests)
 		return
 	}
 
-	log.Printf("[oidc] Password grant user=%q ip=%s", username, ip)
-	userGUID, _, err := h.authenticateUser(username, password)
+	log.Printf("[oidc] Password grant user=%q app=%q ip=%s", username, app.AppID, ip)
+	userGUID, _, err := h.authenticateUser(username, password, app)
 	if err != nil {
 		log.Printf("[oidc] Password grant failed user=%q ip=%s reason=%q", username, ip, err.Error())
 		h.audit("login_failed", "", ip, map[string]interface{}{
@@ -503,12 +509,6 @@ func (h *Handler) handleOIDCTokenPassword(w http.ResponseWriter, r *http.Request
 
 	// Assign default roles
 	h.assignDefaultRoles(user.GUID)
-
-	app, err := h.resolveApp(r.FormValue("client_id"))
-	if err != nil {
-		oidcError(w, "invalid_client", "unknown client", http.StatusBadRequest)
-		return
-	}
 
 	log.Printf("[oidc] Password grant success user=%q guid=%s app=%q ip=%s", username, user.GUID, app.AppID, ip)
 	h.issueOIDCTokens(w, r, user, scope, "", app)

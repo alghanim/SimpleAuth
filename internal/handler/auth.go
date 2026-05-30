@@ -67,7 +67,7 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[login] Attempt user=%q app=%q ip=%s", req.Username, app.AppID, ip)
 
-	userGUID, ldapGroups, err := h.authenticateUser(req.Username, req.Password)
+	userGUID, ldapGroups, err := h.authenticateUser(req.Username, req.Password, app)
 	if err != nil {
 		log.Printf("[login] Failed user=%q ip=%s reason=%q", req.Username, ip, err.Error())
 		h.audit("login_failed", "", ip, map[string]interface{}{"username": req.Username, "reason": err.Error()})
@@ -121,12 +121,35 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 // authenticateUser performs the full auth flow and returns (userGUID, ldapGroups, error).
 // Flow: local first -> LDAP fallback. Local users are SimpleAuth's own — they always take priority.
 // On successful LDAP auth, user profile is synced from the LDAP result.
-func (h *Handler) authenticateUser(username, password string) (string, []string, error) {
+func (h *Handler) authenticateUser(username, password string, app *store.App) (string, []string, error) {
 	var userGUID string
 	var ldapGroups []string
 	var ldapResult *auth.LDAPResult
 	var authenticated bool
 	var localUser *store.User // track for lockout accounting
+
+	// Step 0: app-local users (v2 M5). At a given app, an app-local user of the
+	// same name shadows any directory user — a customer named like an employee
+	// never inherits employee access. App-local users authenticate locally only.
+	if app != nil {
+		if guid, err := h.store.ResolveMapping("applocal:"+app.AppID, username); err == nil {
+			user, uerr := h.store.ResolveUser(guid)
+			if uerr == nil && user.OwnerAppID == app.AppID {
+				if user.Disabled {
+					return "", nil, fmt.Errorf("account disabled")
+				}
+				if h.isAccountLocked(user) {
+					return "", nil, fmt.Errorf("account locked")
+				}
+				if user.PasswordHash != "" && auth.CheckPassword(user.PasswordHash, password) {
+					log.Printf("[auth] App-local auth success user=%q app=%q guid=%s", username, app.AppID, user.GUID)
+					return user.GUID, nil, nil
+				}
+				h.recordFailedLogin(user)
+				return "", nil, fmt.Errorf("invalid credentials")
+			}
+		}
+	}
 
 	// Step 1: Try local identity mapping + password (local users always take priority)
 	guid, err := h.store.ResolveMapping("local", username)

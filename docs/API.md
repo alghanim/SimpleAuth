@@ -2634,3 +2634,33 @@ curl -u billing:$APP_SECRET -X POST …/sauth/api/app/bootstrap \
 So a developer's whole integration is: get `app_id`/`app_secret` from the admin →
 `bootstrap` roles on deploy → point the SDK at SimpleAuth with `audience` set to
 the app → `verify()`.
+
+### App-local users (Milestone 5)
+
+Apps can own **local users that aren't in your directory** (e.g. a customer
+portal). They authenticate locally, only ever receive `aud=<the app>` tokens,
+are **not** shared via cross-app SSO, and are **exempt** from
+`require_assignment`. Usernames are unique **per app** — `alice` in app A is a
+different person from `alice` in app B — and at a given app an app-local user
+**shadows** any directory user of the same name.
+
+Provisioning requires the app's `allow_local_users` flag and uses the app
+credential (Basic or management token):
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/app/users` | Create an app-local user `{username, password, display_name?, email?, roles?}`. |
+| `GET` | `/api/app/users` | List this app's local users. |
+| `PUT` | `/api/app/users/{guid}/password` | Reset a local user's password. |
+| `DELETE` | `/api/app/users/{guid}` | Delete a local user (must be owned by this app). |
+
+```bash
+curl -u portal:$APP_SECRET -X POST …/sauth/api/app/users \
+  -H "Content-Type: application/json" \
+  -d '{"username":"customer1","password":"…","display_name":"Customer One","roles":["member"]}'
+
+# the customer then logs in scoped to the app
+curl -X POST …/sauth/api/auth/login \
+  -d '{"username":"customer1","password":"…","app_id":"portal"}'
+# token: aud=portal, roles=["member"]
+```

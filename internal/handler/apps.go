@@ -57,16 +57,24 @@ func (h *Handler) appAllowsRedirect(a *store.App, redirectURI string) bool {
 	return isAllowedRedirect(h.getRedirectURIs(), redirectURI)
 }
 
-// userAssignmentKeys returns the identifiers a user may be assigned to an app
-// by: GUID, sAMAccountName, and preferred username.
+// userAssignmentKeys returns every identifier a user may be assigned to an app
+// by: GUID, sAMAccountName, and all of the user's identity-mapping usernames
+// (local, applocal, ldap, …). This lets an app assign a user by whatever name it
+// knows them as (e.g. an app-local user's username).
 func (h *Handler) userAssignmentKeys(user *store.User) []string {
-	keys := make([]string, 0, 3)
+	keys := make([]string, 0, 4)
 	seen := map[string]bool{}
-	for _, k := range []string{user.GUID, user.SAMAccountName, h.resolvePreferredUsername(user)} {
+	add := func(k string) {
 		if k != "" && !seen[k] {
 			seen[k] = true
 			keys = append(keys, k)
 		}
+	}
+	add(user.GUID)
+	add(user.SAMAccountName)
+	mappings, _ := h.store.GetMappingsForUser(user.GUID)
+	for _, m := range mappings {
+		add(m.ExternalID)
 	}
 	return keys
 }
@@ -113,8 +121,8 @@ func (h *Handler) resolveTokenRoles(app *store.App, user *store.User) (roles, pe
 	perms = sortedKeys(permSet)
 
 	// require_assignment denies directory users with no assignment. App-local
-	// users (owned by this app) are exempt — handled in M5.
-	if app.RequireAssignment && !assigned {
+	// users (owned by this app) are inherently the app's and exempt (M5).
+	if app.RequireAssignment && !assigned && user.OwnerAppID != app.AppID {
 		denied = true
 	}
 	return roles, perms, denied

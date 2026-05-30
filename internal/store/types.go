@@ -21,6 +21,10 @@ type User struct {
 	Disabled       bool      `json:"disabled"`
 	MergedInto     string    `json:"merged_into,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
+	// OwnerAppID, when set, marks this as an app-LOCAL user owned by that app
+	// (v2 M5): authenticated locally, only ever issued aud=owner-app tokens, and
+	// never shared via cross-app SSO. Empty = a global directory user.
+	OwnerAppID string `json:"owner_app_id,omitempty"`
 
 	// Password security
 	ForcePasswordChange bool       `json:"force_password_change,omitempty"`

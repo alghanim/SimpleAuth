@@ -245,6 +245,11 @@ func (h *Handler) registerRoutes(uiFS fs.FS) {
 	h.mux.HandleFunc("GET /api/app/authz", h.requireApp(h.handleGetOwnAuthz))
 	h.mux.HandleFunc("PUT /api/app/authz", h.requireApp(h.handleSetOwnAuthz))
 	h.mux.HandleFunc("GET /api/app/settings", h.requireApp(h.handleAppSettings))
+	// App-local users (v2 M5) — provisioning, gated by allow_local_users.
+	h.mux.HandleFunc("POST /api/app/users", h.requireApp(h.handleCreateLocalUser))
+	h.mux.HandleFunc("GET /api/app/users", h.requireApp(h.handleListLocalUsers))
+	h.mux.HandleFunc("DELETE /api/app/users/{guid}", h.requireApp(h.handleDeleteLocalUser))
+	h.mux.HandleFunc("PUT /api/app/users/{guid}/password", h.requireApp(h.handleSetLocalUserPassword))
 
 	// Admin: Bootstrap
 	h.mux.HandleFunc("POST /api/admin/bootstrap", h.requireMasterAdmin(h.handleBootstrap))
