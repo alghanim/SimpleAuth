@@ -105,23 +105,32 @@ public class SimpleAuthClient : IDisposable
         using var doc = JsonDocument.Parse(payloadJson);
         var root = doc.RootElement;
 
-        // Check expiry
-        if (root.TryGetProperty("exp", out var expEl))
+        // Reject refresh tokens presented as access tokens: they are signed by
+        // the same key but carry a family_id and no authorization claims.
+        if (root.TryGetProperty("family_id", out var famEl) &&
+            !string.IsNullOrEmpty(famEl.GetString()))
+            throw new SimpleAuthException("Refresh token is not valid for resource access.");
+
+        // Expiration is mandatory — fail closed if the claim is absent.
+        if (!root.TryGetProperty("exp", out var expEl))
+            throw new SimpleAuthException("Token missing a valid exp claim.");
+        var expTime = DateTimeOffset.FromUnixTimeSeconds(expEl.GetInt64());
+        if (expTime < DateTimeOffset.UtcNow)
+            throw new SimpleAuthException("Token has expired.");
+
+        // Issuer check is opt-in. Direct login tokens use iss="simpleauth", so
+        // the old hardcoded BaseUrl check rejected every login token — only
+        // enforce when an ExpectedIssuer is configured.
+        if (!string.IsNullOrEmpty(_options.ExpectedIssuer))
         {
-            var expUnix = expEl.GetInt64();
-            var expTime = DateTimeOffset.FromUnixTimeSeconds(expUnix);
-            if (expTime < DateTimeOffset.UtcNow)
-                throw new SimpleAuthException("Token has expired.");
+            var issuer = root.TryGetProperty("iss", out var issEl) ? issEl.GetString() : null;
+            if (!string.Equals(issuer, _options.ExpectedIssuer, StringComparison.Ordinal))
+                throw new SimpleAuthException($"Invalid issuer: {issuer}, expected: {_options.ExpectedIssuer}");
         }
 
-        // Check issuer
-        if (root.TryGetProperty("iss", out var issEl))
-        {
-            var issuer = issEl.GetString();
-            var expectedIssuer = BaseUrl;
-            if (!string.Equals(issuer, expectedIssuer, StringComparison.OrdinalIgnoreCase))
-                throw new SimpleAuthException($"Invalid issuer: {issuer}, expected: {expectedIssuer}");
-        }
+        // Optional audience check.
+        if (!string.IsNullOrEmpty(_options.Audience) && !AudienceContains(root, _options.Audience!))
+            throw new SimpleAuthException($"Token audience does not include {_options.Audience}");
 
         // Map claims to SimpleAuthUser
         var user = new SimpleAuthUser
@@ -140,6 +149,19 @@ public class SimpleAuthClient : IDisposable
         };
 
         return user;
+    }
+
+    private static bool AudienceContains(JsonElement root, string audience)
+    {
+        if (!root.TryGetProperty("aud", out var audEl)) return false;
+        if (audEl.ValueKind == JsonValueKind.String)
+            return string.Equals(audEl.GetString(), audience, StringComparison.Ordinal);
+        if (audEl.ValueKind == JsonValueKind.Array)
+            foreach (var item in audEl.EnumerateArray())
+                if (item.ValueKind == JsonValueKind.String &&
+                    string.Equals(item.GetString(), audience, StringComparison.Ordinal))
+                    return true;
+        return false;
     }
 
     private static List<string> GetStringList(JsonElement root, string property)

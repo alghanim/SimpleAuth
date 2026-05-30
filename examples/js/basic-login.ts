@@ -17,7 +17,7 @@ import { createSimpleAuth, SimpleAuthError } from "@simpleauth/js";
 // --- Configuration --------------------------------------------------------
 
 const auth = createSimpleAuth({
-  url: process.env.SIMPLEAUTH_URL ?? "https://auth.corp.local/sauth",
+  url: process.env.SIMPLEAUTH_URL ?? "https://auth.example.com/sauth",
 });
 
 // --- Helpers --------------------------------------------------------------

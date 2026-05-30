@@ -22,9 +22,59 @@ import { createSimpleAuth, SimpleAuthError, SimpleAuthUser } from "@simpleauth/j
 // ==========================================================================
 // File: lib/auth.ts
 
+// Base SimpleAuth URL (includes the `/sauth` base path). Used both to build
+// the SDK client and to construct OIDC authorization/token endpoints. Do not
+// reach into the SDK's private `url` field — keep this as the single source.
+const SIMPLEAUTH_URL = process.env.SIMPLEAUTH_URL ?? "https://auth.example.com/sauth";
+
 const auth = createSimpleAuth({
-  url: process.env.SIMPLEAUTH_URL ?? "https://auth.corp.local/sauth",
+  url: SIMPLEAUTH_URL,
 });
+
+// --- OIDC helpers ---------------------------------------------------------
+
+/** Base64url-encode an ArrayBuffer (no padding, URL-safe alphabet). */
+function base64url(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/** Parse a Cookie header into a name->value map. */
+function parseCookies(header: string | null): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!header) return out;
+  for (const part of header.split(";")) {
+    const idx = part.indexOf("=");
+    if (idx === -1) continue;
+    const name = part.slice(0, idx).trim();
+    const value = part.slice(idx + 1).trim();
+    if (name) out[name] = decodeURIComponent(value);
+  }
+  return out;
+}
+
+/**
+ * Generate a PKCE code_verifier and its S256 code_challenge.
+ * The verifier is a high-entropy random string; the challenge is
+ * base64url(SHA-256(verifier)) per RFC 7636.
+ */
+async function pkceChallenge(): Promise<{ verifier: string; challenge: string }> {
+  const random = new Uint8Array(32);
+  crypto.getRandomValues(random);
+  const verifier = base64url(random.buffer);
+
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(verifier),
+  );
+  const challenge = base64url(digest);
+
+  return { verifier, challenge };
+}
 
 /**
  * Extract and verify the Bearer token from a Request object.
@@ -123,16 +173,61 @@ export async function GET_auth_callback(request: Request): Promise<Response> {
     return Response.json({ error: "Missing authorization code" }, { status: 400 });
   }
 
+  // Read the state and PKCE verifier we stored when initiating the flow.
+  const cookies = parseCookies(request.headers.get("cookie"));
+  const expectedState = cookies["oauth_state"];
+  const codeVerifier = cookies["pkce_verifier"];
+
+  // Verify the state parameter to defend against CSRF. The value returned by
+  // the authorization server must match the one we set in the cookie.
+  if (!state || !expectedState || state !== expectedState) {
+    return Response.redirect(new URL("/login?error=invalid_state", url.origin));
+  }
+
+  if (!codeVerifier) {
+    return Response.redirect(new URL("/login?error=missing_pkce_verifier", url.origin));
+  }
+
   try {
-    // Exchange the authorization code for tokens
+    // Exchange the authorization code for tokens at the OIDC token endpoint.
     const redirectUri = `${url.origin}/api/auth/callback`;
-    const tokens = await auth.exchangeCode(code, redirectUri);
+    const tokenUrl = `${SIMPLEAUTH_URL}/realms/simpleauth/protocol/openid-connect/token`;
+
+    const body = new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: redirectUri,
+      client_id: "simpleauth",
+      code_verifier: codeVerifier,
+    });
+
+    const resp = await fetch(tokenUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+    });
+
+    if (!resp.ok) {
+      const errBody = await resp.json().catch(() => ({}));
+      throw new SimpleAuthError(
+        errBody.error_description ?? errBody.error ?? "Code exchange failed",
+        resp.status,
+        errBody.error,
+        errBody.error_description,
+      );
+    }
+
+    const tokens = (await resp.json()) as {
+      access_token: string;
+      refresh_token?: string;
+      expires_in: number;
+    };
 
     // In a real app: store the tokens in an HTTP-only cookie or session.
     // Here we set a cookie with the access token for demonstration.
     const headers = new Headers();
     headers.set("Location", "/dashboard");
-    headers.set(
+    headers.append(
       "Set-Cookie",
       `access_token=${tokens.access_token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${tokens.expires_in}`,
     );
@@ -145,9 +240,13 @@ export async function GET_auth_callback(request: Request): Promise<Response> {
       );
     }
 
+    // Clear the one-time state and PKCE verifier cookies.
+    headers.append("Set-Cookie", "oauth_state=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0");
+    headers.append("Set-Cookie", "pkce_verifier=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0");
+
     return new Response(null, { status: 302, headers });
   } catch (err) {
-    console.error("Code exchange failed:", err);
+    console.error("Code exchange failed:", err instanceof Error ? err.message : err);
     return Response.redirect(new URL("/login?error=code_exchange_failed", url.origin));
   }
 }
@@ -159,21 +258,33 @@ export async function GET_auth_login(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const redirectUri = `${url.origin}/api/auth/callback`;
 
-  // Generate a random state parameter for CSRF protection
+  // Generate a random state parameter for CSRF protection, plus a PKCE
+  // verifier/challenge pair (RFC 7636) so the code exchange is bound to this
+  // browser even without a client secret.
   const state = crypto.randomUUID();
+  const { verifier, challenge } = await pkceChallenge();
 
-  const authUrl = auth.getAuthorizationUrl({
-    redirectUri,
-    state,
-    scope: "openid profile email",
-  });
+  // Build the OIDC authorization URL.
+  const authUrl = new URL(`${SIMPLEAUTH_URL}/realms/simpleauth/protocol/openid-connect/auth`);
+  authUrl.searchParams.set("client_id", "simpleauth");
+  authUrl.searchParams.set("redirect_uri", redirectUri);
+  authUrl.searchParams.set("response_type", "code");
+  authUrl.searchParams.set("scope", "openid profile email");
+  authUrl.searchParams.set("state", state);
+  authUrl.searchParams.set("code_challenge", challenge);
+  authUrl.searchParams.set("code_challenge_method", "S256");
 
-  // Store state in a cookie to verify on callback
+  // Store the state and PKCE verifier in HttpOnly cookies to verify/use on the
+  // callback. Both are short-lived and cleared once the flow completes.
   const headers = new Headers();
-  headers.set("Location", authUrl);
-  headers.set(
+  headers.set("Location", authUrl.toString());
+  headers.append(
     "Set-Cookie",
     `oauth_state=${state}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=600`,
+  );
+  headers.append(
+    "Set-Cookie",
+    `pkce_verifier=${verifier}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=600`,
   );
 
   return new Response(null, { status: 302, headers });

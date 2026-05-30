@@ -1,10 +1,10 @@
 // ---------------------------------------------------------------------------
 // SimpleAuth Example: Service-to-Service Authentication
 // ---------------------------------------------------------------------------
-// Demonstrates machine-to-machine (M2M) authentication using the client
-// credentials grant. Common patterns:
+// Demonstrates machine-to-machine (M2M) authentication using a dedicated
+// service-account login. Common patterns:
 //
-//   1. Obtain a token via client credentials
+//   1. Obtain a token by logging in as a service account
 //   2. Call another internal service with that token
 //   3. Automatic token caching and renewal
 //   4. Building a reusable authenticated HTTP client
@@ -21,6 +21,8 @@ import { createSimpleAuth, SimpleAuthError, TokenResponse } from "@simpleauth/js
 
 class TokenManager {
   private auth;
+  private readonly username: string;
+  private readonly password: string;
   private cachedToken: TokenResponse | null = null;
   private tokenExpiresAt = 0; // Unix timestamp in seconds
   private refreshing: Promise<string> | null = null;
@@ -30,21 +32,19 @@ class TokenManager {
 
   constructor(options: {
     url: string;
-    clientId: string;
-    clientSecret: string;
+    username: string;
+    password: string;
     refreshMarginSec?: number;
   }) {
-    this.auth = createSimpleAuth({
-      url: options.url,
-      clientId: options.clientId,
-      clientSecret: options.clientSecret,
-    });
+    this.auth = createSimpleAuth({ url: options.url });
+    this.username = options.username;
+    this.password = options.password;
     this.refreshMarginSec = options.refreshMarginSec ?? 30;
   }
 
   /**
-   * Returns a valid access token. Automatically fetches a new one via
-   * client_credentials if the cached token is missing or about to expire.
+   * Returns a valid access token. Automatically logs in again as the service
+   * account if the cached token is missing or about to expire.
    *
    * Safe to call concurrently — concurrent callers share a single in-flight
    * token request.
@@ -72,33 +72,11 @@ class TokenManager {
   }
 
   private async fetchNewToken(): Promise<string> {
-    // The SimpleAuth SDK does not expose a standalone clientCredentials()
-    // method on the JS client, so we call the token endpoint directly.
-    const tokenUrl = `${this.auth["url"]}/realms/${this.auth["realm"]}/protocol/openid-connect/token`;
+    // Authenticate as the service account via the direct login API. The
+    // returned access token is used as the Bearer credential for downstream
+    // service calls.
+    const token = await this.auth.login(this.username, this.password);
 
-    const body = new URLSearchParams({
-      grant_type: "client_credentials",
-      client_id: this.auth["clientId"],
-      client_secret: this.auth["clientSecret"] ?? "",
-    });
-
-    const resp = await fetch(tokenUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: body.toString(),
-    });
-
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      throw new SimpleAuthError(
-        err.error_description ?? "Client credentials grant failed",
-        resp.status,
-        err.error,
-        err.error_description,
-      );
-    }
-
-    const token: TokenResponse = await resp.json();
     this.cachedToken = token;
     this.tokenExpiresAt = Math.floor(Date.now() / 1000) + token.expires_in;
 
@@ -235,11 +213,23 @@ function createOrderServiceClient(client: AuthenticatedClient): OrderService {
 // ==========================================================================
 
 async function main() {
+  // Service-account credentials come from the environment — never hardcode
+  // secrets in source. Both must be set.
+  const serviceUser = process.env.SIMPLEAUTH_SERVICE_USER;
+  const servicePassword = process.env.SIMPLEAUTH_SERVICE_PASSWORD;
+
+  if (!serviceUser || !servicePassword) {
+    console.error(
+      "SIMPLEAUTH_SERVICE_USER and SIMPLEAUTH_SERVICE_PASSWORD must be set.",
+    );
+    process.exit(1);
+  }
+
   // Create a token manager for this service's identity
   const tokenManager = new TokenManager({
-    url: process.env.SIMPLEAUTH_URL ?? "https://auth.corp.local:9090",
-    clientId: process.env.SIMPLEAUTH_CLIENT_ID ?? "billing-service",
-    clientSecret: process.env.SIMPLEAUTH_CLIENT_SECRET ?? "billing-service-secret",
+    url: process.env.SIMPLEAUTH_URL ?? "https://auth.example.com/sauth",
+    username: serviceUser,
+    password: servicePassword,
     refreshMarginSec: 60, // Refresh 60 seconds before expiry
   });
 

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"html"
 	"log"
 	"net/http"
 	"net/url"
@@ -71,7 +72,8 @@ func (h *Handler) handleHostedLoginPage(w http.ResponseWriter, r *http.Request) 
 
 	errorHTML := ""
 	if errorMsg != "" {
-		errorHTML = `<div class="error">` + errorMsg + `</div>`
+		// Escape the reflected error to prevent reflected XSS (M9).
+		errorHTML = `<div class="error">` + html.EscapeString(errorMsg) + `</div>`
 	}
 
 	ssoEnabled := h.getKeytabPath() != ""
@@ -113,7 +115,7 @@ func (h *Handler) handleHostedLoginPage(w http.ResponseWriter, r *http.Request) 
 	if rs := h.runtimeSettings.get(); rs != nil && rs.AutoSSODelay > 0 {
 		ssoDelay = rs.AutoSSODelay
 	}
-	fmt.Fprintf(w, h.bp(hostedLoginHTML), redirectURI, errorHTML, ssoLink, csrfToken, ssoEnabledStr, autoSSOStr, ssoDelay)
+	fmt.Fprintf(w, h.bp(hostedLoginHTML), html.EscapeString(redirectURI), errorHTML, ssoLink, csrfToken, ssoEnabledStr, autoSSOStr, ssoDelay)
 }
 
 // handleHostedLoginSubmit processes the hosted login form submission.

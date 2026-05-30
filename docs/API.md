@@ -583,6 +583,12 @@ curl -k -X POST \
 
 #### Resource Owner Password Grant
 
+> **Confidential grant — disabled by default.** This grant is only available
+> when `AUTH_CLIENT_SECRET` is set on the server, and then the request must
+> present that secret (`client_secret`, or HTTP Basic). Without a configured
+> secret the token endpoint returns `invalid_client`. Prefer the
+> authorization-code flow; ROPC is deprecated in OAuth 2.1.
+
 ```bash
 curl -k -X POST \
   https://auth.example.com/sauth/realms/simpleauth/protocol/openid-connect/token \
@@ -590,7 +596,8 @@ curl -k -X POST \
   -d "username=jsmith" \
   -d "password=secret" \
   -d "scope=openid profile email" \
-  -d "client_id=simpleauth"
+  -d "client_id=simpleauth" \
+  -d "client_secret=$AUTH_CLIENT_SECRET"
 ```
 
 **Response (200):**
@@ -617,11 +624,16 @@ curl -k -X POST \
 
 #### Client Credentials Grant
 
+> **Confidential grant — disabled by default.** Requires `AUTH_CLIENT_SECRET` to
+> be configured on the server and presented as `client_secret`. Without it the
+> endpoint returns `invalid_client`.
+
 ```bash
 curl -k -X POST \
   https://auth.example.com/sauth/realms/simpleauth/protocol/openid-connect/token \
   -d "grant_type=client_credentials" \
-  -d "client_id=simpleauth"
+  -d "client_id=simpleauth" \
+  -d "client_secret=$AUTH_CLIENT_SECRET"
 ```
 
 **Response (200):**
@@ -708,15 +720,20 @@ curl -k -H "Authorization: Bearer ACCESS_TOKEN" \
 
 ### `POST /realms/{realm}/protocol/openid-connect/token/introspect`
 
-**Auth:** Client credentials
+**Auth:** Client credentials (**required**)
 
 RFC 7662 Token Introspection. Validates a token and returns its claims.
+
+> **Protected endpoint.** Requires `AUTH_CLIENT_SECRET` to be configured and
+> presented as `client_secret` (or HTTP Basic). Anonymous introspection is
+> rejected with `invalid_client`, so it cannot be used as a token/PII oracle.
 
 ```bash
 curl -k -X POST \
   https://auth.example.com/sauth/realms/simpleauth/protocol/openid-connect/token/introspect \
   -d "token=eyJ..." \
-  -d "client_id=simpleauth"
+  -d "client_id=simpleauth" \
+  -d "client_secret=$AUTH_CLIENT_SECRET"
 ```
 
 **Response (200) -- active token:**

@@ -66,6 +66,11 @@ type Config struct {
 	AutoSSO      bool `yaml:"auto_sso"`
 	AutoSSODelay int  `yaml:"auto_sso_delay"` // seconds, default 3
 
+	// EnableTestEndpoints exposes the diagnostic /test-negotiate Kerberos/LDAP
+	// pages. They are unauthenticated and perform live LDAP binds (a password
+	// oracle), so they are OFF by default. Enable only for troubleshooting.
+	EnableTestEndpoints bool `yaml:"enable_test_endpoints"`
+
 	// Session SSO (cross-app session cookie)
 	EnableSessionSSO  bool          `yaml:"enable_session_sso"`
 	SessionSSOIdleTTL time.Duration `yaml:"session_sso_idle_ttl"`
@@ -116,6 +121,8 @@ type configFile struct {
 	EnableSessionSSO  bool   `yaml:"enable_session_sso"`
 	SessionSSOIdleTTL string `yaml:"session_sso_idle_ttl"`
 	SessionSSOMaxTTL  string `yaml:"session_sso_max_ttl"`
+
+	EnableTestEndpoints bool `yaml:"enable_test_endpoints"`
 }
 
 // Load reads config with priority: env vars > config file > defaults.
@@ -504,6 +511,9 @@ func loadConfigFile(cfg *Config) {
 	if fc.EnableSessionSSO {
 		cfg.EnableSessionSSO = true
 	}
+	if fc.EnableTestEndpoints {
+		cfg.EnableTestEndpoints = true
+	}
 	if fc.SessionSSOIdleTTL != "" {
 		if d, err := time.ParseDuration(fc.SessionSSOIdleTTL); err == nil {
 			cfg.SessionSSOIdleTTL = d
@@ -652,6 +662,9 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("AUTH_ENABLE_SESSION_SSO"); v != "" {
 		cfg.EnableSessionSSO = v == "true" || v == "1" || v == "yes"
+	}
+	if v := os.Getenv("AUTH_ENABLE_TEST_ENDPOINTS"); v != "" {
+		cfg.EnableTestEndpoints = v == "true" || v == "1" || v == "yes"
 	}
 	if v := os.Getenv("AUTH_SESSION_SSO_IDLE_TTL"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {

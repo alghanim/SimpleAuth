@@ -1,10 +1,15 @@
 // ServiceAuth/Program.cs -- Service-to-service authentication with SimpleAuth.
 //
 // Demonstrates:
-//   - Client credentials flow (machine-to-machine)
+//   - Service-account login (machine-to-machine via a dedicated user)
 //   - IHttpClientFactory with auto-injected Bearer token via DelegatingHandler
 //   - Background service that maintains a fresh token
 //   - Making authenticated calls to downstream APIs
+//
+// Environment variables:
+//   SIMPLEAUTH_URL               SimpleAuth server URL incl. /sauth base path
+//   SIMPLEAUTH_SERVICE_USER      Service-account username (required)
+//   SIMPLEAUTH_SERVICE_PASSWORD  Service-account password (required)
 //
 // Prerequisites:
 //   dotnet add reference to the SimpleAuth SDK project
@@ -26,20 +31,33 @@ using SimpleAuth;
 
 var builder = Host.CreateApplicationBuilder(args);
 
-// Register SimpleAuth client as a singleton
+// Register SimpleAuth client as a singleton.
+// The server URL must include the /sauth base path.
 var authOptions = new SimpleAuthOptions
 {
-    Url = "https://auth.example.com",
-    ClientId = "inventory-service",
-    ClientSecret = "service-secret-key-here",
-    Realm = "simpleauth",
+    Url = Environment.GetEnvironmentVariable("SIMPLEAUTH_URL")
+        ?? "https://auth.example.com/sauth",
     ValidateSsl = true,
 };
 var authClient = new SimpleAuthClient(authOptions);
 builder.Services.AddSingleton(authClient);
 
-// Register the token provider (holds and refreshes the service token)
-builder.Services.AddSingleton<ServiceTokenProvider>();
+// SimpleAuth's recommended M2M pattern is a dedicated service-account user.
+// Credentials are supplied via environment variables -- never hardcode them.
+var serviceUser = Environment.GetEnvironmentVariable("SIMPLEAUTH_SERVICE_USER")
+    ?? throw new InvalidOperationException(
+        "SIMPLEAUTH_SERVICE_USER environment variable is required.");
+var servicePassword = Environment.GetEnvironmentVariable("SIMPLEAUTH_SERVICE_PASSWORD")
+    ?? throw new InvalidOperationException(
+        "SIMPLEAUTH_SERVICE_PASSWORD environment variable is required.");
+
+// Register the token provider (holds and refreshes the service token).
+// The service-account credentials are wired in explicitly here.
+builder.Services.AddSingleton(sp => new ServiceTokenProvider(
+    sp.GetRequiredService<SimpleAuthClient>(),
+    sp.GetRequiredService<ILogger<ServiceTokenProvider>>(),
+    serviceUser,
+    servicePassword));
 
 // Register the DelegatingHandler that injects Bearer tokens
 builder.Services.AddTransient<AuthenticatedHttpHandler>();
@@ -61,17 +79,19 @@ await host.RunAsync();
 
 
 // ===========================================================================
-// ServiceTokenProvider -- obtains and caches a client-credentials token
+// ServiceTokenProvider -- obtains and caches a service-account token
 // ===========================================================================
 
 /// <summary>
-/// Thread-safe token provider that uses the client_credentials grant
-/// and refreshes the token before it expires.
+/// Thread-safe token provider that authenticates a dedicated service-account
+/// user via service-account login and re-logs in before the token expires.
 /// </summary>
 public class ServiceTokenProvider
 {
     private readonly SimpleAuthClient _client;
     private readonly ILogger<ServiceTokenProvider> _logger;
+    private readonly string _username;
+    private readonly string _password;
     private readonly SemaphoreSlim _lock = new(1, 1);
 
     private string? _accessToken;
@@ -80,10 +100,16 @@ public class ServiceTokenProvider
     // Refresh 60 seconds before the token actually expires
     private static readonly TimeSpan RefreshMargin = TimeSpan.FromSeconds(60);
 
-    public ServiceTokenProvider(SimpleAuthClient client, ILogger<ServiceTokenProvider> logger)
+    public ServiceTokenProvider(
+        SimpleAuthClient client,
+        ILogger<ServiceTokenProvider> logger,
+        string username,
+        string password)
     {
         _client = client;
         _logger = logger;
+        _username = username;
+        _password = password;
     }
 
     /// <summary>
@@ -102,9 +128,11 @@ public class ServiceTokenProvider
             if (_accessToken is not null && DateTime.UtcNow < _expiresAt)
                 return _accessToken;
 
-            _logger.LogInformation("Obtaining new service token via client_credentials...");
+            _logger.LogInformation(
+                "Obtaining new service token via service-account login for {User}...",
+                _username);
 
-            var tokens = await _client.ClientCredentialsAsync();
+            var tokens = await _client.LoginAsync(_username, _password);
             _accessToken = tokens.AccessToken!;
             _expiresAt = DateTime.UtcNow.AddSeconds(tokens.ExpiresIn) - RefreshMargin;
 

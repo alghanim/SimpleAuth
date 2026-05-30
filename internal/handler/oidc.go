@@ -2,8 +2,13 @@ package handler
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"html"
 	"log"
 	"net/http"
 	"net/url"
@@ -65,6 +70,15 @@ func (h *Handler) handleOIDCDiscovery(w http.ResponseWriter, r *http.Request) {
 	issuer := h.oidcIssuer(r)
 	prefix := base + "/realms/" + h.cfg.JWTIssuer + "/protocol/openid-connect"
 
+	// Advertise only what is actually enabled. Confidential grants and
+	// client-secret auth appear only when a client secret is configured (C2).
+	grantTypes := []string{"authorization_code", "refresh_token"}
+	authMethods := []string{"none"}
+	if h.oidcConfidentialEnabled() {
+		grantTypes = append(grantTypes, "client_credentials", "password")
+		authMethods = []string{"client_secret_basic", "client_secret_post"}
+	}
+
 	doc := map[string]interface{}{
 		"issuer":                                issuer,
 		"authorization_endpoint":                prefix + "/auth",
@@ -74,11 +88,12 @@ func (h *Handler) handleOIDCDiscovery(w http.ResponseWriter, r *http.Request) {
 		"introspection_endpoint":                prefix + "/token/introspect",
 		"end_session_endpoint":                  prefix + "/logout",
 		"response_types_supported":              []string{"code"},
-		"grant_types_supported":                 []string{"authorization_code", "client_credentials", "password", "refresh_token"},
+		"grant_types_supported":                 grantTypes,
 		"subject_types_supported":               []string{"public"},
 		"id_token_signing_alg_values_supported": []string{"RS256"},
 		"scopes_supported":                      []string{"openid", "profile", "email", "roles"},
-		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post"},
+		"token_endpoint_auth_methods_supported": authMethods,
+		"code_challenge_methods_supported":      []string{"S256"},
 		"claims_supported": []string{
 			"sub", "iss", "aud", "exp", "iat", "name", "email",
 			"preferred_username", "realm_access", "resource_access",
@@ -91,15 +106,65 @@ func (h *Handler) handleOIDCDiscovery(w http.ResponseWriter, r *http.Request) {
 	jsonResp(w, doc, http.StatusOK)
 }
 
-// authenticateOIDCClient validates client credentials.
-// SimpleAuth is single-app — client credentials are not enforced.
+// authenticateOIDCClient is the gate for PUBLIC client flows (authorization_code,
+// refresh_token). These are protected by single-use codes + PKCE and by stored,
+// rotating refresh tokens, so no client secret is required — consistent with the
+// single-app public-client model.
 func (h *Handler) authenticateOIDCClient(r *http.Request) error {
+	return nil
+}
+
+// oidcConfidentialEnabled reports whether confidential grants (password,
+// client_credentials) and token introspection are enabled. They require a
+// client secret (AUTH_CLIENT_SECRET) to be configured.
+func (h *Handler) oidcConfidentialEnabled() bool {
+	return h.cfg.ClientSecret != ""
+}
+
+// requireConfidentialClient enforces client authentication for confidential
+// endpoints (password + client_credentials grants and introspection). It
+// requires AUTH_CLIENT_SECRET to be set; if it is not, these flows are DISABLED.
+// The presented secret (client_secret_post or HTTP Basic) is compared in
+// constant time. Closes C2 (open password/client_credentials) and C3 (open
+// introspection).
+func (h *Handler) requireConfidentialClient(r *http.Request) error {
+	if !h.oidcConfidentialEnabled() {
+		return fmt.Errorf("grant disabled: set a client secret (AUTH_CLIENT_SECRET) to enable confidential grants")
+	}
+	presented := r.FormValue("client_secret")
+	if presented == "" {
+		if _, pw, ok := r.BasicAuth(); ok {
+			presented = pw
+		}
+	}
+	if presented == "" || !timingSafeEqual(presented, h.cfg.ClientSecret) {
+		return fmt.Errorf("invalid client credentials")
+	}
 	return nil
 }
 
 // oidcClientID returns the client_id for OIDC claims.
 func (h *Handler) oidcClientID() string {
 	return "simpleauth"
+}
+
+// verifyPKCE validates a PKCE code_verifier against the stored code_challenge
+// (RFC 7636). S256 is preferred; "plain"/empty compares verbatim. Comparisons
+// are constant-time.
+func verifyPKCE(verifier, challenge, method string) bool {
+	if verifier == "" {
+		return false
+	}
+	switch method {
+	case "S256":
+		sum := sha256.Sum256([]byte(verifier))
+		computed := base64.RawURLEncoding.EncodeToString(sum[:])
+		return subtle.ConstantTimeCompare([]byte(computed), []byte(challenge)) == 1
+	case "", "plain":
+		return subtle.ConstantTimeCompare([]byte(verifier), []byte(challenge)) == 1
+	default:
+		return false
+	}
 }
 
 // handleOIDCAuthorize handles the OAuth2 authorization endpoint.
@@ -120,6 +185,8 @@ func (h *Handler) handleOIDCAuthorize(w http.ResponseWriter, r *http.Request) {
 	state := r.FormValue("state")
 	nonce := r.FormValue("nonce")
 	scope := r.FormValue("scope")
+	codeChallenge := r.FormValue("code_challenge")
+	codeChallengeMethod := r.FormValue("code_challenge_method")
 	username := r.FormValue("username")
 	password := r.FormValue("password")
 
@@ -168,25 +235,30 @@ func (h *Handler) handleOIDCAuthorize(w http.ResponseWriter, r *http.Request) {
 		"flow": "authorization_code",
 	})
 
-	h.issueOIDCCodeRedirect(w, r, user, redirectURI, scope, state, nonce)
+	h.issueOIDCCodeRedirect(w, r, user, redirectURI, scope, state, nonce, codeChallenge, codeChallengeMethod)
 }
 
 // issueOIDCCodeRedirect mints an OIDC auth code for `user` and redirects the
 // browser to `redirectURI?code=...&state=...`. Used by both the normal POST
 // login path and the session-cookie fast path.
-func (h *Handler) issueOIDCCodeRedirect(w http.ResponseWriter, r *http.Request, user *store.User, redirectURI, scope, state, nonce string) {
+func (h *Handler) issueOIDCCodeRedirect(w http.ResponseWriter, r *http.Request, user *store.User, redirectURI, scope, state, nonce, codeChallenge, codeChallengeMethod string) {
 	codeBytes := make([]byte, 32)
-	rand.Read(codeBytes)
+	if _, err := rand.Read(codeBytes); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 	code := hex.EncodeToString(codeBytes)
 
 	ac := &store.OIDCAuthCode{
-		Code:        code,
-		UserGUID:    user.GUID,
-		RedirectURI: redirectURI,
-		Scope:       scope,
-		Nonce:       nonce,
-		ExpiresAt:   time.Now().Add(10 * time.Minute),
-		CreatedAt:   time.Now(),
+		Code:                code,
+		UserGUID:            user.GUID,
+		RedirectURI:         redirectURI,
+		Scope:               scope,
+		Nonce:               nonce,
+		CodeChallenge:       codeChallenge,
+		CodeChallengeMethod: codeChallengeMethod,
+		ExpiresAt:           time.Now().Add(10 * time.Minute),
+		CreatedAt:           time.Now(),
 	}
 	if err := h.store.SaveOIDCAuthCode(ac); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -220,6 +292,8 @@ func (h *Handler) showOIDCLoginPage(w http.ResponseWriter, r *http.Request) {
 	state := r.URL.Query().Get("state")
 	nonce := r.URL.Query().Get("nonce")
 	scope := r.URL.Query().Get("scope")
+	codeChallenge := r.URL.Query().Get("code_challenge")
+	codeChallengeMethod := r.URL.Query().Get("code_challenge_method")
 	errorMsg := r.URL.Query().Get("error")
 	prompt := r.URL.Query().Get("prompt")
 
@@ -229,7 +303,7 @@ func (h *Handler) showOIDCLoginPage(w http.ResponseWriter, r *http.Request) {
 	if errorMsg == "" && prompt != "login" {
 		if guid := h.resolveSessionCookie(w, r); guid != "" {
 			if user, err := h.store.ResolveUser(guid); err == nil && !user.Disabled {
-				h.issueOIDCCodeRedirect(w, r, user, redirectURI, scope, state, nonce)
+				h.issueOIDCCodeRedirect(w, r, user, redirectURI, scope, state, nonce, codeChallenge, codeChallengeMethod)
 				return
 			}
 		}
@@ -237,7 +311,8 @@ func (h *Handler) showOIDCLoginPage(w http.ResponseWriter, r *http.Request) {
 
 	errorHTML := ""
 	if errorMsg != "" {
-		errorHTML = `<div class="error">` + errorMsg + `</div>`
+		// Escape the reflected error to prevent reflected XSS (M9).
+		errorHTML = `<div class="error">` + html.EscapeString(errorMsg) + `</div>`
 	}
 
 	realm := h.cfg.JWTIssuer
@@ -260,6 +335,10 @@ func (h *Handler) showOIDCLoginPage(w http.ResponseWriter, r *http.Request) {
 		}
 		if nonce != "" {
 			ssoLink += "&nonce=" + url.QueryEscape(nonce)
+		}
+		if codeChallenge != "" {
+			ssoLink += "&code_challenge=" + url.QueryEscape(codeChallenge)
+			ssoLink += "&code_challenge_method=" + url.QueryEscape(codeChallengeMethod)
 		}
 	}
 
@@ -284,8 +363,11 @@ func (h *Handler) showOIDCLoginPage(w http.ResponseWriter, r *http.Request) {
 		ssoDelay = rs.AutoSSODelay
 	}
 
+	// Escape values reflected into HTML to prevent reflected XSS (M9). ssoLink
+	// is assembled from URL-escaped components above, so it is safe as-is.
+	esc := html.EscapeString
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, oidcLoginHTML, action, h.oidcClientID(), redirectURI, state, nonce, scope, appName, errorHTML, ssoLink, ssoEnabledStr, autoSSOStr, ssoDelay)
+	fmt.Fprintf(w, oidcLoginHTML, action, h.oidcClientID(), esc(redirectURI), esc(state), esc(nonce), esc(scope), esc(appName), errorHTML, ssoLink, ssoEnabledStr, autoSSOStr, ssoDelay, esc(codeChallenge), esc(codeChallengeMethod))
 }
 
 // handleOIDCToken handles the OAuth2 token endpoint.
@@ -337,6 +419,16 @@ func (h *Handler) handleOIDCTokenAuthCode(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// PKCE (RFC 7636): when a code_challenge was bound to the code at authorize
+	// time, require a matching code_verifier so an intercepted code cannot be
+	// redeemed by anyone else (M6).
+	if ac.CodeChallenge != "" {
+		if !verifyPKCE(r.FormValue("code_verifier"), ac.CodeChallenge, ac.CodeChallengeMethod) {
+			oidcError(w, "invalid_grant", "PKCE verification failed", http.StatusBadRequest)
+			return
+		}
+	}
+
 	user, err := h.store.ResolveUser(ac.UserGUID)
 	if err != nil {
 		oidcError(w, "server_error", "user not found", http.StatusInternalServerError)
@@ -348,7 +440,9 @@ func (h *Handler) handleOIDCTokenAuthCode(w http.ResponseWriter, r *http.Request
 }
 
 func (h *Handler) handleOIDCTokenPassword(w http.ResponseWriter, r *http.Request) {
-	if err := h.authenticateOIDCClient(r); err != nil {
+	// Resource Owner Password Credentials is a confidential grant — requires a
+	// client secret, disabled by default (C2).
+	if err := h.requireConfidentialClient(r); err != nil {
 		oidcError(w, "invalid_client", err.Error(), http.StatusUnauthorized)
 		return
 	}
@@ -397,7 +491,9 @@ func (h *Handler) handleOIDCTokenPassword(w http.ResponseWriter, r *http.Request
 }
 
 func (h *Handler) handleOIDCTokenClientCredentials(w http.ResponseWriter, r *http.Request) {
-	if err := h.authenticateOIDCClient(r); err != nil {
+	// client_credentials is a confidential grant — requires a client secret,
+	// disabled by default so anonymous callers can't mint signed tokens (C2).
+	if err := h.requireConfidentialClient(r); err != nil {
 		oidcError(w, "invalid_client", err.Error(), http.StatusUnauthorized)
 		return
 	}
@@ -448,19 +544,18 @@ func (h *Handler) handleOIDCTokenRefresh(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	storedRT, err := h.store.GetRefreshToken(claims.ID)
-	if err != nil || storedRT == nil {
-		oidcError(w, "invalid_grant", "refresh token not found", http.StatusUnauthorized)
-		return
-	}
-
-	if storedRT.Used {
+	// Atomically consume the refresh token (single-use) — closes the rotation
+	// TOCTOU (H2).
+	storedRT, err := h.store.ConsumeRefreshToken(claims.ID)
+	if errors.Is(err, store.ErrRefreshTokenReused) {
 		h.store.RevokeTokenFamily(storedRT.FamilyID)
 		oidcError(w, "invalid_grant", "token reuse detected, all sessions revoked", http.StatusUnauthorized)
 		return
 	}
-
-	h.store.MarkRefreshTokenUsed(claims.ID)
+	if err != nil {
+		oidcError(w, "invalid_grant", "refresh token not found", http.StatusUnauthorized)
+		return
+	}
 
 	user, err := h.store.ResolveUser(claims.Subject)
 	if err != nil {
@@ -469,6 +564,11 @@ func (h *Handler) handleOIDCTokenRefresh(w http.ResponseWriter, r *http.Request)
 	}
 	if user.Disabled {
 		oidcError(w, "invalid_grant", "account disabled", http.StatusUnauthorized)
+		return
+	}
+	// Honor the admin access-revocation kill switch on refresh too (M3).
+	if revoked, _ := h.store.IsUserAccessRevoked(user.GUID); revoked {
+		oidcError(w, "invalid_grant", "access revoked", http.StatusUnauthorized)
 		return
 	}
 
@@ -483,21 +583,23 @@ func (h *Handler) handleOIDCTokenRefresh(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	newRefreshToken, newTokenID, err := h.jwt.IssueRefreshToken(user.GUID, storedRT.FamilyID, h.cfg.RefreshTTL)
+	newRefreshToken, newTokenID, newFamilyID, err := h.jwt.IssueRefreshToken(user.GUID, storedRT.FamilyID, h.cfg.RefreshTTL)
 	if err != nil {
 		oidcError(w, "server_error", "refresh token generation failed", http.StatusInternalServerError)
 		return
 	}
 
-	rtClaims, _ := h.jwt.ValidateToken(newRefreshToken)
 	rt := &store.RefreshToken{
 		TokenID:   newTokenID,
-		FamilyID:  rtClaims.FamilyID,
+		FamilyID:  newFamilyID,
 		UserGUID:  user.GUID,
 		ExpiresAt: time.Now().UTC().Add(h.cfg.RefreshTTL),
 		CreatedAt: time.Now().UTC(),
 	}
-	h.store.SaveRefreshToken(rt)
+	if err := h.store.SaveRefreshToken(rt); err != nil {
+		oidcError(w, "server_error", "refresh token generation failed", http.StatusInternalServerError)
+		return
+	}
 
 	jsonResp(w, map[string]interface{}{
 		"access_token":  accessToken,
@@ -524,21 +626,23 @@ func (h *Handler) issueOIDCTokens(w http.ResponseWriter, r *http.Request, user *
 	}
 
 	// Refresh token
-	refreshToken, tokenID, err := h.jwt.IssueRefreshToken(user.GUID, "", h.cfg.RefreshTTL)
+	refreshToken, tokenID, familyID, err := h.jwt.IssueRefreshToken(user.GUID, "", h.cfg.RefreshTTL)
 	if err != nil {
 		oidcError(w, "server_error", "refresh token generation failed", http.StatusInternalServerError)
 		return
 	}
 
-	rtClaims, _ := h.jwt.ValidateToken(refreshToken)
 	rt := &store.RefreshToken{
 		TokenID:   tokenID,
-		FamilyID:  rtClaims.FamilyID,
+		FamilyID:  familyID,
 		UserGUID:  user.GUID,
 		ExpiresAt: time.Now().UTC().Add(h.cfg.RefreshTTL),
 		CreatedAt: time.Now().UTC(),
 	}
-	h.store.SaveRefreshToken(rt)
+	if err := h.store.SaveRefreshToken(rt); err != nil {
+		oidcError(w, "server_error", "refresh token generation failed", http.StatusInternalServerError)
+		return
+	}
 
 	// ID token
 	idClaims := auth.Claims{
@@ -554,7 +658,9 @@ func (h *Handler) issueOIDCTokens(w http.ResponseWriter, r *http.Request, user *
 		idClaims.PreferredUsername = user.DisplayName
 	}
 	idClaims.Subject = user.GUID
-	idClaims.Audience = []string{h.cfg.ClientID}
+	// Use the canonical client_id (cfg.ClientID has no default, which produced
+	// an empty id_token audience on stock installs — M1).
+	idClaims.Audience = []string{h.oidcClientID()}
 
 	idToken, err := h.jwt.IssueIDToken(idClaims, h.cfg.AccessTTL, issuer)
 	if err != nil {
@@ -684,7 +790,9 @@ func (h *Handler) handleOIDCIntrospect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.authenticateOIDCClient(r); err != nil {
+	// Introspection is a protected resource (RFC 7662) — requires client auth
+	// so anonymous callers cannot probe token validity or read claims (C3).
+	if err := h.requireConfidentialClient(r); err != nil {
 		oidcError(w, "invalid_client", err.Error(), http.StatusUnauthorized)
 		return
 	}
@@ -872,6 +980,8 @@ input:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 3px rgba(143,
       <input type="hidden" name="nonce" value="%[5]s">
       <input type="hidden" name="scope" value="%[6]s">
       <input type="hidden" name="response_type" value="code">
+      <input type="hidden" name="code_challenge" value="%[13]s">
+      <input type="hidden" name="code_challenge_method" value="%[14]s">
       <label>Username</label>
       <input type="text" name="username" placeholder="Enter your username" autofocus required>
       <label>Password</label>

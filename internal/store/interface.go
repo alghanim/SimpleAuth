@@ -1,8 +1,19 @@
 package store
 
 import (
+	"errors"
 	"io"
 	"time"
+)
+
+// Sentinel errors for atomic refresh-token consumption.
+var (
+	// ErrRefreshTokenNotFound is returned when the token ID does not exist.
+	ErrRefreshTokenNotFound = errors.New("refresh token not found")
+	// ErrRefreshTokenReused is returned by ConsumeRefreshToken when the token
+	// was already consumed. The caller should treat this as replay and revoke
+	// the token's family. The returned *RefreshToken carries the FamilyID.
+	ErrRefreshTokenReused = errors.New("refresh token already used")
 )
 
 // Store defines the storage interface for SimpleAuth. Both BoltDB and
@@ -60,6 +71,10 @@ type Store interface {
 	SaveRefreshToken(rt *RefreshToken) error
 	GetRefreshToken(tokenID string) (*RefreshToken, error)
 	MarkRefreshTokenUsed(tokenID string) error
+	// ConsumeRefreshToken atomically marks an unused token as used and returns
+	// it, in a single transaction (closes the rotation TOCTOU). Returns
+	// ErrRefreshTokenNotFound or ErrRefreshTokenReused on the respective cases.
+	ConsumeRefreshToken(tokenID string) (*RefreshToken, error)
 	RevokeTokenFamily(familyID string) error
 	ListUserSessions(userGUID string) ([]*RefreshToken, error)
 	RevokeUserTokens(userGUID string) error

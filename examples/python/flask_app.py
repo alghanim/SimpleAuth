@@ -17,6 +17,8 @@ Usage:
   # or: python flask_app.py
 """
 
+import os
+
 from flask import Flask, Blueprint, g, jsonify, request
 
 from simpleauth.client import SimpleAuth, AuthenticationError
@@ -27,11 +29,16 @@ from simpleauth.middleware import flask_middleware
 # Configuration
 # ---------------------------------------------------------------------------
 
-SIMPLEAUTH_URL = "https://auth.example.com/sauth"
+# Server URL must include the base path (the stock server mounts at /sauth).
+SIMPLEAUTH_URL = os.environ.get("SIMPLEAUTH_URL", "https://auth.example.com/sauth")
+
+# TLS verification stays ON by default. Only set SIMPLEAUTH_INSECURE=true for
+# local development against a self-signed certificate.
+VERIFY_SSL = os.environ.get("SIMPLEAUTH_INSECURE") != "true"
 
 auth = SimpleAuth(
     url=SIMPLEAUTH_URL,
-    verify_ssl=True,
+    verify_ssl=VERIFY_SSL,
 )
 
 

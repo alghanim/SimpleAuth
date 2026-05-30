@@ -141,6 +141,8 @@ SimpleAuth looks for a config file in this order:
 | `enable_session_sso` | `AUTH_ENABLE_SESSION_SSO` | `false` | Enables a shared SSO session cookie. After a successful login, SimpleAuth sets an HttpOnly cookie on its own host. On subsequent redirects from any app, the login page is skipped and fresh tokens are issued immediately. Works across different subdomains — apps never see the cookie; only SimpleAuth does. See [Session SSO](#shared-sso-session-cookie) below. |
 | `session_sso_idle_ttl` | `AUTH_SESSION_SSO_IDLE_TTL` | `8h` | Session dies after this duration of inactivity. Bumped every time a user's browser hits SimpleAuth (each redirect from an app counts). Go duration format. |
 | `session_sso_max_ttl` | `AUTH_SESSION_SSO_MAX_TTL` | `720h` | Absolute maximum lifetime regardless of activity. After this, the user must re-authenticate. Default is 30 days. Go duration format. |
+| `client_secret` | `AUTH_CLIENT_SECRET` | (none) | When set, **enables** the confidential OIDC flows — the `password` and `client_credentials` grants and token introspection — and requires this value as `client_secret` (post body or HTTP Basic). Leave empty (default) to keep those flows **disabled**. The public `authorization_code` (with PKCE) and `refresh_token` flows never need it. |
+| `enable_test_endpoints` | `AUTH_ENABLE_TEST_ENDPOINTS` | `false` | Exposes the diagnostic `/test-negotiate` Kerberos/LDAP pages. They are unauthenticated and perform live LDAP binds (a password oracle), so keep them off in production — enable only for troubleshooting. |
 
 ---
 
@@ -418,8 +420,13 @@ On first startup, SimpleAuth auto-generates several things if they don't already
 1. **Data directory** -- Created at `data_dir` with mode `0700`
 2. **BoltDB database** -- `{data_dir}/auth.db` (unless Postgres is configured)
 3. **TLS certificate** -- `{data_dir}/tls.crt` and `{data_dir}/tls.key` (self-signed, 10-year validity, includes all local IPs in SANs)
-4. **RSA signing keys** -- Stored in the database, used for JWT signing (RS256)
-5. **Admin key** -- Printed to logs if not configured
+4. **RSA signing keys** -- `{data_dir}/private.pem` / `public.pem`, used for JWT signing (RS256)
+5. **Secrets data key** -- `{data_dir}/secret.key` (mode `0600`), an AES-256 key used to encrypt secrets at rest (e.g. the LDAP bind password). **Back this up together with the database but store it separately** — a database backup does not contain the key, so without `secret.key` the encrypted secrets cannot be recovered.
+6. **Admin key** -- Printed to logs if not configured
+
+> **Kerberos note:** SPNEGO logins are verified against the keytab with a ±5-minute
+> clock-skew tolerance and a replay cache. The SimpleAuth host, the KDC/AD, and
+> clients must be NTP-synchronized or valid tickets will be rejected.
 
 ---
 

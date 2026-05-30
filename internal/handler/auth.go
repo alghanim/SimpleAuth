@@ -4,27 +4,36 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"html"
 	"log"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jcmturner/gokrb5/v8/keytab"
 	krbmsg "github.com/jcmturner/gokrb5/v8/messages"
+	"github.com/jcmturner/gokrb5/v8/service"
 	"github.com/jcmturner/gokrb5/v8/spnego"
 
 	"simpleauth/internal/auth"
 	"simpleauth/internal/store"
 )
 
+// kerberosMaxClockSkew bounds the acceptable difference between the Kerberos
+// ticket/authenticator time and this server's clock. It also sizes the AP-REQ
+// replay cache window. Standard Kerberos tolerance is 5 minutes — ensure the
+// server, KDC, and clients are NTP-synced.
+const kerberosMaxClockSkew = 5 * time.Minute
+
 func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	ip := getClientIP(r)
 
 	if !h.loginLimiter.allow(ip) {
-		w.Header().Set("Retry-After", string(rune(h.loginLimiter.retryAfter(ip)+'0')))
+		w.Header().Set("Retry-After", strconv.Itoa(h.loginLimiter.retryAfter(ip)))
 		jsonError(w, "too many login attempts", http.StatusTooManyRequests)
 		return
 	}
@@ -48,14 +57,11 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("[login] Failed user=%q ip=%s reason=%q", req.Username, ip, err.Error())
 		h.audit("login_failed", "", ip, map[string]interface{}{"username": req.Username, "reason": err.Error()})
-		switch err.Error() {
-		case "account disabled":
-			jsonError(w, "account disabled", http.StatusForbidden)
-		case "account locked":
-			jsonError(w, "account locked due to too many failed attempts", http.StatusForbidden)
-		default:
-			jsonError(w, "invalid credentials", http.StatusUnauthorized)
-		}
+		// Return a uniform failure regardless of cause (unknown user, wrong
+		// password, disabled, or locked) so an unauthenticated caller cannot
+		// enumerate account state (M7). The specific reason is in the audit log
+		// and visible to admins.
+		jsonError(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
 
@@ -342,20 +348,23 @@ func (h *Handler) issueTokenPair(user *store.User, roles []string, perms []strin
 		return "", "", 0, err
 	}
 
-	refreshToken, tokenID, err := h.jwt.IssueRefreshToken(user.GUID, "", h.cfg.RefreshTTL)
+	refreshToken, tokenID, familyID, err := h.jwt.IssueRefreshToken(user.GUID, "", h.cfg.RefreshTTL)
 	if err != nil {
 		return "", "", 0, err
 	}
 
-	rtClaims, _ := h.jwt.ValidateToken(refreshToken)
 	rt := &store.RefreshToken{
 		TokenID:   tokenID,
-		FamilyID:  rtClaims.FamilyID,
+		FamilyID:  familyID,
 		UserGUID:  user.GUID,
 		ExpiresAt: time.Now().UTC().Add(h.cfg.RefreshTTL),
 		CreatedAt: time.Now().UTC(),
 	}
-	h.store.SaveRefreshToken(rt)
+	// Persist before returning the pair: if the refresh row is not stored, the
+	// client would receive a refresh token that can never be redeemed.
+	if err := h.store.SaveRefreshToken(rt); err != nil {
+		return "", "", 0, fmt.Errorf("persist refresh token: %w", err)
+	}
 
 	return accessToken, refreshToken, int(h.cfg.AccessTTL.Seconds()), nil
 }
@@ -425,15 +434,11 @@ func (h *Handler) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if token exists and hasn't been used
-	storedRT, err := h.store.GetRefreshToken(claims.ID)
-	if err != nil {
-		log.Printf("[refresh] Token not found id=%s user=%s ip=%s", claims.ID, claims.Subject, ip)
-		jsonError(w, "refresh token not found", http.StatusUnauthorized)
-		return
-	}
-
-	if storedRT.Used {
+	// Atomically consume the refresh token (single-use). This closes the
+	// rotation TOCTOU: two concurrent requests with the same token cannot both
+	// succeed — exactly one consumes it, any other sees reuse.
+	storedRT, err := h.store.ConsumeRefreshToken(claims.ID)
+	if errors.Is(err, store.ErrRefreshTokenReused) {
 		// Token reuse detected — revoke entire family
 		h.store.RevokeTokenFamily(storedRT.FamilyID)
 		log.Printf("[refresh] REPLAY DETECTED user=%s family=%s ip=%s — all sessions revoked", claims.Subject, storedRT.FamilyID, ip)
@@ -443,14 +448,16 @@ func (h *Handler) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "token reuse detected, all sessions revoked", http.StatusUnauthorized)
 		return
 	}
+	if err != nil {
+		log.Printf("[refresh] Token not found id=%s user=%s ip=%s", claims.ID, claims.Subject, ip)
+		jsonError(w, "refresh token not found", http.StatusUnauthorized)
+		return
+	}
 
 	if time.Now().After(storedRT.ExpiresAt) {
 		jsonError(w, "refresh token expired", http.StatusUnauthorized)
 		return
 	}
-
-	// Mark old token as used
-	h.store.MarkRefreshTokenUsed(claims.ID)
 
 	// Get user
 	user, err := h.store.ResolveUser(claims.Subject)
@@ -460,6 +467,12 @@ func (h *Handler) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	if user.Disabled {
 		jsonError(w, "account disabled", http.StatusForbidden)
+		return
+	}
+	// Honor the admin "revoke all sessions" kill switch on refresh too (M3):
+	// a refreshed access token must not be mintable after access revocation.
+	if revoked, _ := h.store.IsUserAccessRevoked(user.GUID); revoked {
+		jsonError(w, "access revoked", http.StatusUnauthorized)
 		return
 	}
 
@@ -487,7 +500,7 @@ func (h *Handler) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	newRefreshToken, newTokenID, err := h.jwt.IssueRefreshToken(user.GUID, storedRT.FamilyID, h.cfg.RefreshTTL)
+	newRefreshToken, newTokenID, newFamilyID, err := h.jwt.IssueRefreshToken(user.GUID, storedRT.FamilyID, h.cfg.RefreshTTL)
 	if err != nil {
 		jsonError(w, "refresh token generation failed", http.StatusInternalServerError)
 		return
@@ -495,12 +508,15 @@ func (h *Handler) handleRefresh(w http.ResponseWriter, r *http.Request) {
 
 	newRT := &store.RefreshToken{
 		TokenID:   newTokenID,
-		FamilyID:  storedRT.FamilyID,
+		FamilyID:  newFamilyID,
 		UserGUID:  user.GUID,
 		ExpiresAt: time.Now().UTC().Add(h.cfg.RefreshTTL),
 		CreatedAt: time.Now().UTC(),
 	}
-	h.store.SaveRefreshToken(newRT)
+	if err := h.store.SaveRefreshToken(newRT); err != nil {
+		jsonError(w, "refresh token generation failed", http.StatusInternalServerError)
+		return
+	}
 
 	log.Printf("[refresh] Success user=%q guid=%s ip=%s", h.resolvePreferredUsername(user), user.GUID, ip)
 	h.audit("token_refresh", user.GUID, getClientIP(r), nil)
@@ -739,6 +755,11 @@ func (h *Handler) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 // GET /api/auth/negotiate
 // Browser sends Authorization: Negotiate <base64-token>
 func (h *Handler) handleNegotiate(w http.ResponseWriter, r *http.Request) {
+	if !h.loginLimiter.allow(getClientIP(r)) {
+		jsonError(w, "too many requests", http.StatusTooManyRequests)
+		return
+	}
+
 	keytabPath := h.getKeytabPath()
 	if keytabPath == "" {
 		jsonError(w, "Kerberos not configured", http.StatusNotImplemented)
@@ -767,46 +788,18 @@ func (h *Handler) handleNegotiate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse SPNEGO token
-	var spnegoToken spnego.SPNEGOToken
-	if err := spnegoToken.Unmarshal(tokenBytes); err != nil {
+	// Parse and FULLY VERIFY the AP-REQ — authenticator, clock skew, and replay
+	// cache — not just decrypt the ticket (C1).
+	apReq, err := parseAPReqToken(tokenBytes)
+	if err != nil {
 		jsonError(w, "invalid SPNEGO token", http.StatusUnauthorized)
 		return
 	}
-
-	// Extract the Kerberos AP-REQ from the SPNEGO mechToken
-	if len(spnegoToken.NegTokenInit.MechTokenBytes) == 0 {
-		jsonError(w, "no mech token in SPNEGO", http.StatusUnauthorized)
+	username, cname, err := h.verifyAPReq(apReq, kt)
+	if err != nil {
+		log.Printf("[negotiate] AP-REQ verification failed ip=%s err=%v", getClientIP(r), err)
+		jsonError(w, "Kerberos authentication failed", http.StatusUnauthorized)
 		return
-	}
-
-	var apReq krbmsg.APReq
-	if err := apReq.Unmarshal(spnegoToken.NegTokenInit.MechTokenBytes); err != nil {
-		jsonError(w, "invalid AP-REQ", http.StatusUnauthorized)
-		return
-	}
-
-	// Patch keytab kvno to match ticket (AD increments kvno on password changes)
-	patchKeytabKVNO(kt, apReq.Ticket.EncPart.KVNO)
-
-	// Decrypt and validate the ticket
-	if err = apReq.Ticket.DecryptEncPart(kt, nil); err != nil {
-		jsonError(w, "Kerberos ticket validation failed", http.StatusUnauthorized)
-		return
-	}
-
-	// Extract principal name
-	principal := apReq.Ticket.SName.PrincipalNameString()
-	// The client principal is in the encrypted part
-	cname := apReq.Ticket.DecryptedEncPart.CName.PrincipalNameString()
-	if cname == "" {
-		cname = principal
-	}
-
-	// Strip realm if present (user@REALM -> user)
-	username := cname
-	if idx := strings.Index(cname, "@"); idx > 0 {
-		username = cname[:idx]
 	}
 
 	ip := getClientIP(r)
@@ -926,14 +919,7 @@ func (h *Handler) handleNegotiateTest(w http.ResponseWriter, r *http.Request) {
 		var apReq krbmsg.APReq
 		if err2 := apReq.Unmarshal(tokenBytes); err2 == nil {
 			log.Printf("[spnego] Token is raw AP-REQ (not SPNEGO-wrapped)")
-			patchKeytabKVNO(kt, apReq.Ticket.EncPart.KVNO)
-			if err3 := apReq.Ticket.DecryptEncPart(kt, nil); err3 != nil {
-				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-				fmt.Fprintf(w, h.bp(negotiateTestKrbFailedHTML),
-					"Kerberos ticket decryption failed: "+err3.Error())
-				return
-			}
-			// Jump to success handling below
+			// completeKerberosAuth performs full verification (C1).
 			h.completeKerberosAuth(w, r, &apReq, kt)
 			return
 		}
@@ -976,25 +962,18 @@ func (h *Handler) handleNegotiateTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	patchKeytabKVNO(kt, apReq.Ticket.EncPart.KVNO)
-	if err = apReq.Ticket.DecryptEncPart(kt, nil); err != nil {
-		// Ticket decryption failed — keytab mismatch
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprintf(w, h.bp(negotiateTestKrbFailedHTML),
-			"Kerberos ticket decryption failed: "+err.Error()+
-				". The keytab may not match the AD account (password changed, wrong encryption type, or SPN mismatch).")
-		return
-	}
-
+	// Full AP-REQ verification (authenticator + clock skew + replay cache; C1).
 	h.completeKerberosAuth(w, r, &apReq, kt)
 }
 
-// completeKerberosAuth handles the success path after a valid AP-REQ is decrypted.
+// completeKerberosAuth handles the success path after the AP-REQ is fully
+// verified (authenticator + clock skew + replay cache; C1).
 func (h *Handler) completeKerberosAuth(w http.ResponseWriter, r *http.Request, apReq *krbmsg.APReq, kt *keytab.Keytab) {
-	cname := apReq.Ticket.DecryptedEncPart.CName.PrincipalNameString()
-	username := cname
-	if idx := strings.Index(cname, "@"); idx > 0 {
-		username = cname[:idx]
+	username, cname, err := h.verifyAPReq(apReq, kt)
+	if err != nil {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprintf(w, h.bp(negotiateTestKrbFailedHTML), "Kerberos verification failed: "+html.EscapeString(err.Error()))
+		return
 	}
 
 	userInfo := map[string]string{
@@ -1011,6 +990,10 @@ func (h *Handler) completeKerberosAuth(w http.ResponseWriter, r *http.Request, a
 // handleSSOLogin handles redirect-based SPNEGO authentication.
 // GET /login/sso?redirect_uri=... — browser triggers SPNEGO, on success redirects with tokens.
 func (h *Handler) handleSSOLogin(w http.ResponseWriter, r *http.Request) {
+	if !h.loginLimiter.allow(getClientIP(r)) {
+		http.Error(w, "too many requests", http.StatusTooManyRequests)
+		return
+	}
 	redirectURI := r.URL.Query().Get("redirect_uri")
 
 	// Validate redirect_uri
@@ -1139,18 +1122,25 @@ func (h *Handler) handleSSOLogin(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("oidc") == "1" {
 		state := r.URL.Query().Get("state")
 		nonce := r.URL.Query().Get("nonce")
+		codeChallenge := r.URL.Query().Get("code_challenge")
+		codeChallengeMethod := r.URL.Query().Get("code_challenge_method")
 
 		codeBytes := make([]byte, 32)
-		rand.Read(codeBytes)
+		if _, err := rand.Read(codeBytes); err != nil {
+			h.redirectToLoginError(w, r, redirectURI, "Internal error")
+			return
+		}
 		code := hex.EncodeToString(codeBytes)
 
 		ac := &store.OIDCAuthCode{
-			Code:        code,
-			UserGUID:    user.GUID,
-			RedirectURI: redirectURI,
-			Nonce:       nonce,
-			ExpiresAt:   time.Now().Add(10 * time.Minute),
-			CreatedAt:   time.Now(),
+			Code:                code,
+			UserGUID:            user.GUID,
+			RedirectURI:         redirectURI,
+			Nonce:               nonce,
+			CodeChallenge:       codeChallenge,
+			CodeChallengeMethod: codeChallengeMethod,
+			ExpiresAt:           time.Now().Add(10 * time.Minute),
+			CreatedAt:           time.Now(),
 		}
 		if err := h.store.SaveOIDCAuthCode(ac); err != nil {
 			h.redirectToLoginError(w, r, redirectURI, "Internal error")
@@ -1187,48 +1177,19 @@ func (h *Handler) handleSSOLogin(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, h.url("/account")+"#"+fragment, http.StatusFound)
 }
 
-// extractKerberosUsername validates a SPNEGO/Kerberos token and returns the username.
+// extractKerberosUsername validates a SPNEGO/Kerberos token (full AP-REQ
+// verification — authenticator, clock skew, replay cache; C1) and returns the
+// realm-stripped username.
 func (h *Handler) extractKerberosUsername(tokenBytes []byte, kt *keytab.Keytab) (string, error) {
-	// Try SPNEGO-wrapped token first
-	var spnegoToken spnego.SPNEGOToken
-	if err := spnegoToken.Unmarshal(tokenBytes); err == nil {
-		if len(spnegoToken.NegTokenInit.MechTokenBytes) == 0 {
-			return "", fmt.Errorf("no mechanism token in SPNEGO")
-		}
-		mechBytes := spnegoToken.NegTokenInit.MechTokenBytes
-		if isNTLMToken(mechBytes) {
-			return "", fmt.Errorf("NTLM not supported")
-		}
-		mechBytes = stripGSSAPIWrapper(mechBytes)
-		var apReq krbmsg.APReq
-		if err := apReq.Unmarshal(mechBytes); err != nil {
-			return "", fmt.Errorf("AP-REQ parse failed: %w", err)
-		}
-		patchKeytabKVNO(kt, apReq.Ticket.EncPart.KVNO)
-		if err := apReq.Ticket.DecryptEncPart(kt, nil); err != nil {
-			return "", fmt.Errorf("ticket decryption failed: %w", err)
-		}
-		cname := apReq.Ticket.DecryptedEncPart.CName.PrincipalNameString()
-		if idx := strings.Index(cname, "@"); idx > 0 {
-			return cname[:idx], nil
-		}
-		return cname, nil
+	apReq, err := parseAPReqToken(tokenBytes)
+	if err != nil {
+		return "", err
 	}
-
-	// Try raw AP-REQ
-	var apReq krbmsg.APReq
-	if err := apReq.Unmarshal(tokenBytes); err != nil {
-		return "", fmt.Errorf("invalid token: not SPNEGO or AP-REQ")
+	username, _, err := h.verifyAPReq(apReq, kt)
+	if err != nil {
+		return "", err
 	}
-	patchKeytabKVNO(kt, apReq.Ticket.EncPart.KVNO)
-	if err := apReq.Ticket.DecryptEncPart(kt, nil); err != nil {
-		return "", fmt.Errorf("ticket decryption failed: %w", err)
-	}
-	cname := apReq.Ticket.DecryptedEncPart.CName.PrincipalNameString()
-	if idx := strings.Index(cname, "@"); idx > 0 {
-		return cname[:idx], nil
-	}
-	return cname, nil
+	return username, nil
 }
 
 // resolveKerberosUser looks up a Kerberos-authenticated user by the Kerberos
@@ -1311,6 +1272,10 @@ func (h *Handler) resolveKerberosUser(username string) (string, []string, error)
 
 // handleNegotiateTestForm handles the fallback login form (POST).
 func (h *Handler) handleNegotiateTestForm(w http.ResponseWriter, r *http.Request) {
+	if !h.loginLimiter.allow(getClientIP(r)) {
+		http.Error(w, "too many requests", http.StatusTooManyRequests)
+		return
+	}
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "invalid form data", http.StatusBadRequest)
 		return
@@ -1376,6 +1341,71 @@ func (h *Handler) handleNegotiateTestForm(w http.ResponseWriter, r *http.Request
 	}
 
 	h.renderNegotiateSuccess(w, userInfo)
+}
+
+// parseAPReqToken extracts a Kerberos AP-REQ from a raw token that may be a
+// SPNEGO NegTokenInit, a GSS-API-wrapped AP-REQ, or a bare AP-REQ.
+func parseAPReqToken(tokenBytes []byte) (*krbmsg.APReq, error) {
+	var spnegoToken spnego.SPNEGOToken
+	if err := spnegoToken.Unmarshal(tokenBytes); err == nil && len(spnegoToken.NegTokenInit.MechTokenBytes) > 0 {
+		mechBytes := spnegoToken.NegTokenInit.MechTokenBytes
+		if isNTLMToken(mechBytes) {
+			return nil, fmt.Errorf("NTLM is not supported, Kerberos required")
+		}
+		mechBytes = stripGSSAPIWrapper(mechBytes)
+		var apReq krbmsg.APReq
+		if err := apReq.Unmarshal(mechBytes); err != nil {
+			return nil, fmt.Errorf("AP-REQ parse failed: %w", err)
+		}
+		return &apReq, nil
+	}
+	// Not SPNEGO-wrapped — try a bare or GSS-wrapped AP-REQ.
+	var apReq krbmsg.APReq
+	if err := apReq.Unmarshal(stripGSSAPIWrapper(tokenBytes)); err != nil {
+		return nil, fmt.Errorf("invalid token: not SPNEGO or AP-REQ")
+	}
+	return &apReq, nil
+}
+
+// kerberosSettings builds gokrb5 service settings used to verify AP-REQs:
+// enforces clock skew, sizes the replay cache, and disables PAC decoding (group
+// membership is sourced from LDAP, not the PAC).
+func kerberosSettings(kt *keytab.Keytab) *service.Settings {
+	return service.NewSettings(kt,
+		service.MaxClockSkew(kerberosMaxClockSkew),
+		service.DecodePAC(false),
+	)
+}
+
+// verifyAPReq fully validates a Kerberos AP-REQ: it decrypts the ticket AND
+// verifies the authenticator (proving the presenter holds the session key),
+// enforces clock skew, and rejects replays via the replay cache. Returns the
+// realm-stripped username and the full client cname.
+//
+// This replaces the previous decrypt-only path (DecryptEncPart with no
+// authenticator/replay check), which accepted any captured AP-REQ for
+// unlimited replay (C1).
+func (h *Handler) verifyAPReq(apReq *krbmsg.APReq, kt *keytab.Keytab) (username, cname string, err error) {
+	// AD increments the keytab KVNO on service-account password changes; the
+	// in-memory keytab generated from the bind password may carry a placeholder
+	// KVNO. Align it so the correct key is selectable. This does not weaken
+	// verification — the authenticator check below is what proves freshness and
+	// possession of the session key; the service key only decrypts the ticket.
+	patchKeytabKVNO(kt, apReq.Ticket.EncPart.KVNO)
+
+	ok, creds, err := service.VerifyAPREQ(apReq, kerberosSettings(kt))
+	if err != nil {
+		return "", "", fmt.Errorf("AP-REQ verification failed: %w", err)
+	}
+	if !ok {
+		return "", "", fmt.Errorf("AP-REQ verification failed")
+	}
+	cname = creds.CName().PrincipalNameString()
+	username = cname
+	if idx := strings.Index(cname, "@"); idx > 0 {
+		username = cname[:idx]
+	}
+	return username, cname, nil
 }
 
 // isNTLMToken checks if bytes are an NTLM message (raw or SPNEGO-wrapped).

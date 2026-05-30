@@ -576,6 +576,45 @@ func (s *PostgresStore) MarkRefreshTokenUsed(tokenID string) error {
 	return s.SaveRefreshToken(rt)
 }
 
+// ConsumeRefreshToken atomically marks an unused token as used using a
+// SELECT ... FOR UPDATE row lock, closing the rotation TOCTOU window (H2). On
+// reuse it returns the token (carrying FamilyID) with ErrRefreshTokenReused.
+func (s *PostgresStore) ConsumeRefreshToken(tokenID string) (*RefreshToken, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var data []byte
+	err = tx.QueryRow(`SELECT data FROM sa_refresh_tokens WHERE token_id = $1 FOR UPDATE`, tokenID).Scan(&data)
+	if err == sql.ErrNoRows {
+		return nil, ErrRefreshTokenNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	var rt RefreshToken
+	if err := json.Unmarshal(data, &rt); err != nil {
+		return nil, err
+	}
+	if rt.Used {
+		return &rt, ErrRefreshTokenReused
+	}
+	rt.Used = true
+	newData, err := json.Marshal(&rt)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(`UPDATE sa_refresh_tokens SET data = $2 WHERE token_id = $1`, tokenID, newData); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &rt, nil
+}
+
 func (s *PostgresStore) RevokeTokenFamily(familyID string) error {
 	rows, err := s.db.Query(`SELECT data FROM sa_refresh_tokens`)
 	if err != nil {

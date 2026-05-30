@@ -711,6 +711,36 @@ func (s *BoltStore) MarkRefreshTokenUsed(tokenID string) error {
 	})
 }
 
+// ConsumeRefreshToken atomically checks-and-marks a refresh token as used within
+// a single write transaction, closing the rotation TOCTOU window (H2). On reuse
+// it returns the token (so the caller can revoke its family) with
+// ErrRefreshTokenReused.
+func (s *BoltStore) ConsumeRefreshToken(tokenID string) (*RefreshToken, error) {
+	var rt RefreshToken
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		data := tx.Bucket(bucketRefreshTokens).Get([]byte(tokenID))
+		if data == nil {
+			return ErrRefreshTokenNotFound
+		}
+		if err := json.Unmarshal(data, &rt); err != nil {
+			return err
+		}
+		if rt.Used {
+			return ErrRefreshTokenReused
+		}
+		rt.Used = true
+		newData, err := json.Marshal(&rt)
+		if err != nil {
+			return err
+		}
+		return tx.Bucket(bucketRefreshTokens).Put([]byte(tokenID), newData)
+	})
+	if err != nil {
+		return &rt, err
+	}
+	return &rt, nil
+}
+
 // RevokeTokenFamily deletes all refresh tokens belonging to a family.
 func (s *BoltStore) RevokeTokenFamily(familyID string) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
