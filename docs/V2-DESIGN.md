@@ -72,7 +72,8 @@ app_role_permissions(app_id, role, permission)       -- role -> permission map, 
 app_assignments(
   app_id, subject_type ENUM(user|group), subject_id, roles[]
 )   -- PK (app_id, subject_type, subject_id)
-    -- subject_id = user GUID, or a group identifier (AD group CN/DN/SID)
+    -- subject_id = user GUID, or a group's sAMAccountName
+    --   (configurable LDAP attribute; AD group naming varies per deployment)
 
 users(                                  -- extended from v1
   guid PK, ..., password_hash, sam_account_name, disabled, ...,
@@ -240,19 +241,27 @@ docs get per-app `aud`/`client_id` updates.
 - App-local user passwords follow the same policy/lockout/history machinery as
   local directory users, scoped per app.
 
-## 12. Open questions (decide before/while building)
+## 12. Resolved decisions
 
-1. **App-management auth shape** — confirm both Basic and management-token; pick
-   the management-token TTL and claims.
-2. **App-local username collision with directory** — resolution order is
-   app-local-first at a given app; confirm that's desired (a customer named the
-   same as an employee should not get employee access — app-local-first keeps
-   them separate, good).
-3. **Group identifier for assignments** — AD group **CN**, full **DN**, or
-   **SID**? SID is stablest; CN is friendliest. Likely store DN + match by
-   CN/SID. Needs the LDAP group attribute wired at login (already partly there).
-4. **Do app-local users count against `require_assignment`?** Proposed: no —
-   they're inherently the app's; the flag only gates directory users.
+1. **Group identifier for assignments → a configurable LDAP attribute, default
+   `sAMAccountName`.** AD group naming (CN / full DN / SID) varies too much
+   between deployments to hardcode, and `sAMAccountName` is the value that worked
+   reliably in practice. Admins can override the group-identifier attribute (same
+   spirit as v1's configurable attribute mappings). Assignment `subject_id` for a
+   group = this value, matched against the user's resolved groups at login.
+2. **App-local username collision → app-local-first at a given app.** At app X an
+   app-local(X) user shadows a directory user of the same name, so a customer
+   named like an employee never inherits employee access. **(Confirmed.)**
+3. **App-local users are NOT gated by `require_assignment`.** They're inherently
+   the owning app's users and the app manages their roles itself; the flag only
+   gates directory users. **(Confirmed.)**
+4. **App-management auth → both** HTTP Basic (`app_id:app_secret`) and a
+   short-lived management token (`POST /api/app/token`); the SDKs use the token.
+
+### Still to nail during implementation
+- Exact group-membership resolution at login (memberOf → DN → `sAMAccountName`
+  vs. a direct group query) — Milestone 3.
+- Management-token TTL and claim shape — Milestone 4.
 
 ## 13. Milestones
 
