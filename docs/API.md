@@ -2592,3 +2592,45 @@ curl -X PUT …/sauth/api/admin/apps/billing/authz \
   or group assignment is **denied** a token (`403` / `access_denied`).
 - **Back-compat:** an app with no per-app authz defined falls back to the global
   (v1) roles, so existing single-app deployments are unaffected until they opt in.
+
+### App self-service (Milestone 4)
+
+Apps manage their **own** authorization with their `app_id`/`app_secret` — no
+master key. Authenticate either with **HTTP Basic** (`app_id:app_secret`) or by
+exchanging the secret for a short-lived **app-management token**:
+
+```bash
+# option A: HTTP Basic on every call
+curl -u billing:$APP_SECRET …/sauth/api/app/authz
+
+# option B: exchange once, then Bearer
+TOK=$(curl -s -u billing:$APP_SECRET -X POST …/sauth/api/app/token | jq -r .access_token)
+curl -H "Authorization: Bearer $TOK" …/sauth/api/app/authz
+```
+
+The `app_id` is taken from the credential — there is no app id in the path — so
+an app can only ever read/write **its own** scope.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/app/token` | Exchange `app_id`+`app_secret` (Basic or form) for a management token. |
+| `POST` | `/api/app/bootstrap` | Idempotent authz-as-code — declare roles, role_permissions, assignments. Safe on every deploy. |
+| `GET/PUT` | `/api/app/authz` | Read / replace this app's roles + assignments. |
+| `GET` | `/api/app/settings` | This app's settings (no secret). |
+
+```bash
+curl -u billing:$APP_SECRET -X POST …/sauth/api/app/bootstrap \
+  -H "Content-Type: application/json" \
+  -d '{
+        "roles": ["admin","viewer"],
+        "role_permissions": { "admin": ["invoice:write"], "viewer": ["invoice:read"] },
+        "assignments": [
+          { "group": "Finance", "roles": ["admin"] },
+          { "user":  "jsmith", "roles": ["viewer"] }
+        ]
+      }'
+```
+
+So a developer's whole integration is: get `app_id`/`app_secret` from the admin →
+`bootstrap` roles on deploy → point the SDK at SimpleAuth with `audience` set to
+the app → `verify()`.

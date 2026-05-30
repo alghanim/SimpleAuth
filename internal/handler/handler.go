@@ -238,6 +238,14 @@ func (h *Handler) registerRoutes(uiFS fs.FS) {
 	h.mux.HandleFunc("GET /api/admin/apps/{app_id}/authz", h.requireMasterAdmin(h.handleGetAppAuthz))
 	h.mux.HandleFunc("PUT /api/admin/apps/{app_id}/authz", h.requireMasterAdmin(h.handleSetAppAuthz))
 
+	// App self-service (v2) — authed by app_id/app_secret (Basic) or an
+	// app-management token from POST /api/app/token. Scoped to the calling app.
+	h.mux.HandleFunc("POST /api/app/token", h.handleAppToken)
+	h.mux.HandleFunc("POST /api/app/bootstrap", h.requireApp(h.handleAppBootstrap))
+	h.mux.HandleFunc("GET /api/app/authz", h.requireApp(h.handleGetOwnAuthz))
+	h.mux.HandleFunc("PUT /api/app/authz", h.requireApp(h.handleSetOwnAuthz))
+	h.mux.HandleFunc("GET /api/app/settings", h.requireApp(h.handleAppSettings))
+
 	// Admin: Bootstrap
 	h.mux.HandleFunc("POST /api/admin/bootstrap", h.requireMasterAdmin(h.handleBootstrap))
 
