@@ -31,10 +31,14 @@ from simpleauth.client import (
 
 SIMPLEAUTH_URL = os.environ.get("SIMPLEAUTH_URL", "https://auth.example.com/sauth")
 
+# TLS verification stays ON by default. Only set SIMPLEAUTH_INSECURE=true for
+# local development against a self-signed certificate.
+VERIFY_SSL = os.environ.get("SIMPLEAUTH_INSECURE") != "true"
+
 # Create the client once and reuse it (thread-safe, caches JWKS keys)
 auth = SimpleAuth(
     url=SIMPLEAUTH_URL,
-    verify_ssl=True,  # set False for self-signed certs in development
+    verify_ssl=VERIFY_SSL,
 )
 
 

@@ -28,11 +28,12 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddSimpleAuth(options =>
 {
-    // In production, load these from appsettings.json or environment variables:
+    // In production, load this from appsettings.json or environment variables:
     //   options.Url = builder.Configuration["SimpleAuth:Url"]!;
 
-    options.Url = "https://auth.example.com";
-    options.Realm = "simpleauth";
+    // The SimpleAuth server URL must include the /sauth base path.
+    options.Url = Environment.GetEnvironmentVariable("SIMPLEAUTH_URL")
+        ?? "https://auth.example.com/sauth";
     options.ValidateSsl = true;
 });
 
@@ -123,7 +124,8 @@ app.MapGet("/", () => new { status = "ok", service = "SimpleAuth WebApi Example"
 
 app.MapGet("/public/info", () => new
 {
-    auth_server = "https://auth.example.com",
+    auth_server = Environment.GetEnvironmentVariable("SIMPLEAUTH_URL")
+        ?? "https://auth.example.com/sauth",
     docs = "/swagger",
 })
     .WithTags("Public")

@@ -11,7 +11,8 @@
 //   go run main.go
 //
 // Environment variables:
-//   SIMPLEAUTH_URL        — SimpleAuth server URL (default: https://auth.corp.local:9090)
+//   SIMPLEAUTH_URL        — SimpleAuth server URL (default: https://auth.corp.local/sauth)
+//   SIMPLEAUTH_INSECURE   — set "true" to trust self-signed certs (dev only)
 //   TEST_USERNAME         — Username for login (default: admin)
 //   TEST_PASSWORD         — Password for login (default: admin123)
 // ---------------------------------------------------------------------------
@@ -41,7 +42,7 @@ func main() {
 	// -----------------------------------------------------------------
 	client := simpleauth.New(simpleauth.Options{
 		URL:                envOr("SIMPLEAUTH_URL", "https://auth.corp.local/sauth"),
-		InsecureSkipVerify: true, // Only for development with self-signed certs
+		InsecureSkipVerify: os.Getenv("SIMPLEAUTH_INSECURE") == "true", // dev only: trust self-signed certs
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

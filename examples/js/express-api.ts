@@ -35,7 +35,7 @@ declare global {
 // --- Configuration --------------------------------------------------------
 
 const auth = createSimpleAuth({
-  url: process.env.SIMPLEAUTH_URL ?? "https://auth.corp.local:9090",
+  url: process.env.SIMPLEAUTH_URL ?? "https://auth.example.com/sauth",
 });
 
 const app = express();

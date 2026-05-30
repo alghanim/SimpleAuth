@@ -24,8 +24,9 @@ standalone runnable script.
 # SETTINGS CONFIGURATION -- add these to your project's settings.py
 # ============================================================================
 #
-# # SimpleAuth configuration
-# SIMPLEAUTH_URL = "https://auth.example.com"
+# # SimpleAuth configuration -- SIMPLEAUTH_URL must include the base path
+# # (the stock server mounts at /sauth).
+# SIMPLEAUTH_URL = "https://auth.example.com/sauth"
 # SIMPLEAUTH_REALM = "simpleauth"                 # optional, default "simpleauth"
 # SIMPLEAUTH_VERIFY_SSL = True                    # optional, default True
 #

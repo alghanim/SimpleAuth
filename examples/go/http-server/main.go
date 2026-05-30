@@ -59,8 +59,8 @@ func main() {
 	// Initialize SimpleAuth client
 	// -----------------------------------------------------------------
 	auth := simpleauth.New(simpleauth.Options{
-		URL:                envOr("SIMPLEAUTH_URL", "https://auth.corp.local:9090"),
-		InsecureSkipVerify: true,
+		URL:                envOr("SIMPLEAUTH_URL", "https://auth.corp.local/sauth"),
+		InsecureSkipVerify: os.Getenv("SIMPLEAUTH_INSECURE") == "true", // dev only: trust self-signed certs
 	})
 
 	// -----------------------------------------------------------------

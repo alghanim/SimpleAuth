@@ -1,19 +1,21 @@
 // ---------------------------------------------------------------------------
 // SimpleAuth Example: Service-to-Service Authentication (Go)
 // ---------------------------------------------------------------------------
-// Demonstrates machine-to-machine (M2M) authentication using the client
-// credentials grant in Go. Patterns shown:
+// Demonstrates machine-to-machine (M2M) authentication in Go using a dedicated
+// service-account login — the recommended SimpleAuth M2M pattern, since a
+// service is just a user. Patterns shown:
 //
-//   1. Obtain a token via client credentials
+//   1. Obtain a token by logging in as the service account
 //   2. Token caching with automatic renewal
 //   3. HTTP client with auto-injected Bearer token
 //   4. Calling another internal service
 //
 // Usage:
-//   go run main.go
+//   SIMPLEAUTH_SERVICE_USER=billing-svc SIMPLEAUTH_SERVICE_PASSWORD=... go run main.go
 //
 // Environment variables:
-//   SIMPLEAUTH_URL, SIMPLEAUTH_CLIENT_ID, SIMPLEAUTH_CLIENT_SECRET, ORDER_SERVICE_URL
+//   SIMPLEAUTH_URL, SIMPLEAUTH_SERVICE_USER, SIMPLEAUTH_SERVICE_PASSWORD,
+//   ORDER_SERVICE_URL, SIMPLEAUTH_INSECURE (set "true" to trust self-signed certs)
 // ---------------------------------------------------------------------------
 package main
 
@@ -42,10 +44,12 @@ func envOr(key, fallback string) string {
 // 1. TokenManager — caches tokens and refreshes before expiry
 // =========================================================================
 
-// TokenManager handles client_credentials token acquisition with caching.
+// TokenManager acquires and caches an access token via service-account login.
 // It is safe for concurrent use.
 type TokenManager struct {
-	client       *simpleauth.Client
+	client        *simpleauth.Client
+	username      string
+	password      string
 	refreshMargin time.Duration
 
 	mu        sync.Mutex
@@ -53,15 +57,17 @@ type TokenManager struct {
 	expiresAt time.Time
 }
 
-// NewTokenManager creates a TokenManager for the given SimpleAuth client.
-// refreshMargin controls how early before expiry a new token is fetched
-// (default 30 seconds).
-func NewTokenManager(client *simpleauth.Client, refreshMargin time.Duration) *TokenManager {
+// NewTokenManager creates a TokenManager that authenticates as the given
+// service account. refreshMargin controls how early before expiry a new token
+// is fetched (default 30 seconds).
+func NewTokenManager(client *simpleauth.Client, username, password string, refreshMargin time.Duration) *TokenManager {
 	if refreshMargin <= 0 {
 		refreshMargin = 30 * time.Second
 	}
 	return &TokenManager{
 		client:        client,
+		username:      username,
+		password:      password,
 		refreshMargin: refreshMargin,
 	}
 }
@@ -76,8 +82,8 @@ func (tm *TokenManager) GetToken(ctx context.Context) (string, error) {
 		return tm.token.AccessToken, nil
 	}
 
-	// Fetch a new token via client credentials
-	tok, err := tm.client.ClientCredentials(ctx)
+	// Fetch a fresh token by logging in as the service account.
+	tok, err := tm.client.Login(ctx, tm.username, tm.password)
 	if err != nil {
 		return "", fmt.Errorf("token manager: %w", err)
 	}
@@ -246,16 +252,22 @@ func (c *OrderServiceClient) CancelOrder(ctx context.Context, id string) error {
 // =========================================================================
 
 func main() {
-	// Initialize the SimpleAuth client for this service's identity
+	// Initialize the SimpleAuth client.
 	authClient := simpleauth.New(simpleauth.Options{
-		URL:                envOr("SIMPLEAUTH_URL", "https://auth.corp.local:9090"),
-		ClientID:           envOr("SIMPLEAUTH_CLIENT_ID", "billing-service"),
-		ClientSecret:       envOr("SIMPLEAUTH_CLIENT_SECRET", "billing-service-secret"),
-		InsecureSkipVerify: true,
+		URL:                envOr("SIMPLEAUTH_URL", "https://auth.example.com/sauth"),
+		InsecureSkipVerify: os.Getenv("SIMPLEAUTH_INSECURE") == "true", // dev only: trust self-signed certs
 	})
 
+	// Service-account credentials (this service's own identity). Never hardcode
+	// secrets — require them from the environment.
+	serviceUser := os.Getenv("SIMPLEAUTH_SERVICE_USER")
+	servicePassword := os.Getenv("SIMPLEAUTH_SERVICE_PASSWORD")
+	if serviceUser == "" || servicePassword == "" {
+		log.Fatal("set SIMPLEAUTH_SERVICE_USER and SIMPLEAUTH_SERVICE_PASSWORD")
+	}
+
 	// Create a token manager with 60-second refresh margin
-	tokenMgr := NewTokenManager(authClient, 60*time.Second)
+	tokenMgr := NewTokenManager(authClient, serviceUser, servicePassword, 60*time.Second)
 
 	// Build an HTTP client that auto-injects Bearer tokens
 	authenticatedHTTP := &http.Client{

@@ -18,6 +18,8 @@ Usage:
   # Then open http://localhost:8000/docs for interactive API docs
 """
 
+import os
+
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.openapi.utils import get_openapi
 from fastapi.security import HTTPBearer
@@ -30,11 +32,16 @@ from simpleauth.middleware import SimpleAuthDep
 # Configuration
 # ---------------------------------------------------------------------------
 
-SIMPLEAUTH_URL = "https://auth.example.com"
+# Server URL must include the base path (the stock server mounts at /sauth).
+SIMPLEAUTH_URL = os.environ.get("SIMPLEAUTH_URL", "https://auth.example.com/sauth")
+
+# TLS verification stays ON by default. Only set SIMPLEAUTH_INSECURE=true for
+# local development against a self-signed certificate.
+VERIFY_SSL = os.environ.get("SIMPLEAUTH_INSECURE") != "true"
 
 auth = SimpleAuth(
     url=SIMPLEAUTH_URL,
-    verify_ssl=True,
+    verify_ssl=VERIFY_SSL,
 )
 
 # ---------------------------------------------------------------------------
