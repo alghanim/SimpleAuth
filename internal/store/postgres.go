@@ -104,8 +104,77 @@ func (s *PostgresStore) migrate() error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_sa_sessions_user ON sa_sessions(user_guid);
 	CREATE INDEX IF NOT EXISTS idx_sa_sessions_exp ON sa_sessions(expires_at);
+	CREATE TABLE IF NOT EXISTS sa_apps (
+		app_id TEXT PRIMARY KEY,
+		data JSONB NOT NULL
+	);
 	`
 	_, err := s.db.Exec(schema)
+	return err
+}
+
+// --- Apps (v2) ---
+
+func (s *PostgresStore) CreateApp(a *App) error {
+	data, _ := json.Marshal(a)
+	res, err := s.db.Exec(`INSERT INTO sa_apps (app_id, data) VALUES ($1, $2) ON CONFLICT (app_id) DO NOTHING`, a.AppID, data)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrAppExists
+	}
+	return nil
+}
+
+func (s *PostgresStore) GetApp(appID string) (*App, error) {
+	var data []byte
+	err := s.db.QueryRow(`SELECT data FROM sa_apps WHERE app_id = $1`, appID).Scan(&data)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("app not found")
+	}
+	if err != nil {
+		return nil, err
+	}
+	var a App
+	return &a, json.Unmarshal(data, &a)
+}
+
+func (s *PostgresStore) ListApps() ([]*App, error) {
+	rows, err := s.db.Query(`SELECT data FROM sa_apps ORDER BY app_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var apps []*App
+	for rows.Next() {
+		var data []byte
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		var a App
+		if err := json.Unmarshal(data, &a); err != nil {
+			return nil, err
+		}
+		apps = append(apps, &a)
+	}
+	return apps, rows.Err()
+}
+
+func (s *PostgresStore) UpdateApp(a *App) error {
+	data, _ := json.Marshal(a)
+	res, err := s.db.Exec(`UPDATE sa_apps SET data = $2 WHERE app_id = $1`, a.AppID, data)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("app not found")
+	}
+	return nil
+}
+
+func (s *PostgresStore) DeleteApp(appID string) error {
+	_, err := s.db.Exec(`DELETE FROM sa_apps WHERE app_id = $1`, appID)
 	return err
 }
 
@@ -113,6 +182,7 @@ func (s *PostgresStore) migrate() error {
 // a clean target. Do NOT call this on a running Postgres store with live data.
 func (s *PostgresStore) ResetSchema() error {
 	drops := `
+	DROP TABLE IF EXISTS sa_apps CASCADE;
 	DROP TABLE IF EXISTS sa_sessions CASCADE;
 	DROP TABLE IF EXISTS sa_revoked_users CASCADE;
 	DROP TABLE IF EXISTS sa_revoked_tokens CASCADE;

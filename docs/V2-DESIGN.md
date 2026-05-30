@@ -265,7 +265,7 @@ docs get per-app `aud`/`client_id` updates.
 
 ## 13. Milestones
 
-1. **Apps registry** — `apps` table, master CRUD, secret hash + rotation, default-app migration. (No behavior change yet.)
+1. **Apps registry** — `apps` table, master CRUD, secret hash + rotation, default-app migration. (No behavior change yet.) ✅ **Done** (store CRUD in both backends + backend migration, `POST/GET/PUT/DELETE /api/admin/apps` + `…/rotate-secret`, bcrypt secret hash shown once, default-app migration on startup, store + HTTP tests). SDK app-registry helpers fold into M2/M6 with the developer-facing surface (app-registry is a root-admin operation, not app integration).
 2. **Audience-scoped tokens** — stamp `aud`; OIDC `client_id = app_id`; direct-login app context.
 3. **Per-app roles/permissions/assignments** — tables + resolution at token issuance + `require_assignment`.
 4. **App self-management API** — `/api/app/*` + Basic/management-token auth + app-scoped `bootstrap`.

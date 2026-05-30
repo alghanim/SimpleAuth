@@ -48,6 +48,23 @@ type LDAPConfig struct {
 	ConfiguredAt    time.Time `json:"configured_at"`
 }
 
+// App is a registered application (OAuth client) with its own per-app
+// authorization scope (v2). The AppID partitions all per-app roles, permissions,
+// and assignments; SecretHash authenticates the app for self-management and
+// confidential token flows. SecretHash is never returned by the API.
+type App struct {
+	AppID             string    `json:"app_id"`
+	Name              string    `json:"name"`
+	Audience          string    `json:"audience"`
+	SecretHash        string    `json:"secret_hash,omitempty"`
+	RedirectURIs      []string  `json:"redirect_uris,omitempty"`
+	CORSOrigins       []string  `json:"cors_origins,omitempty"`
+	RequireAssignment bool      `json:"require_assignment"`
+	AllowLocalUsers   bool      `json:"allow_local_users"`
+	Disabled          bool      `json:"disabled,omitempty"`
+	CreatedAt         time.Time `json:"created_at"`
+}
+
 type IdentityMapping struct {
 	Provider   string `json:"provider"`
 	ExternalID string `json:"external_id"`

@@ -28,6 +28,7 @@ var (
 	bucketRevokedTokens    = []byte("revoked_tokens")
 	bucketRevokedUsers     = []byte("revoked_users")
 	bucketSessions         = []byte("sessions")
+	bucketApps             = []byte("apps")
 )
 
 // BoltStore implements the Store interface using BoltDB (bbolt).
@@ -58,6 +59,72 @@ func (s *BoltStore) Close() error {
 	return s.db.Close()
 }
 
+// --- Apps (v2) ---
+
+func (s *BoltStore) CreateApp(a *App) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketApps)
+		if b.Get([]byte(a.AppID)) != nil {
+			return ErrAppExists
+		}
+		data, err := json.Marshal(a)
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(a.AppID), data)
+	})
+}
+
+func (s *BoltStore) GetApp(appID string) (*App, error) {
+	var a App
+	err := s.db.View(func(tx *bolt.Tx) error {
+		data := tx.Bucket(bucketApps).Get([]byte(appID))
+		if data == nil {
+			return fmt.Errorf("app not found")
+		}
+		return json.Unmarshal(data, &a)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
+func (s *BoltStore) ListApps() ([]*App, error) {
+	var apps []*App
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketApps).ForEach(func(k, v []byte) error {
+			var a App
+			if err := json.Unmarshal(v, &a); err != nil {
+				return err
+			}
+			apps = append(apps, &a)
+			return nil
+		})
+	})
+	return apps, err
+}
+
+func (s *BoltStore) UpdateApp(a *App) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketApps)
+		if b.Get([]byte(a.AppID)) == nil {
+			return fmt.Errorf("app not found")
+		}
+		data, err := json.Marshal(a)
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(a.AppID), data)
+	})
+}
+
+func (s *BoltStore) DeleteApp(appID string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketApps).Delete([]byte(appID))
+	})
+}
+
 func (s *BoltStore) init() error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		for _, b := range [][]byte{
@@ -70,6 +137,7 @@ func (s *BoltStore) init() error {
 			bucketRevokedTokens,
 			bucketRevokedUsers,
 			bucketSessions,
+			bucketApps,
 		} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err

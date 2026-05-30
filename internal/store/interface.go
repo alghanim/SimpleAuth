@@ -14,6 +14,8 @@ var (
 	// was already consumed. The caller should treat this as replay and revoke
 	// the token's family. The returned *RefreshToken carries the FamilyID.
 	ErrRefreshTokenReused = errors.New("refresh token already used")
+	// ErrAppExists is returned by CreateApp when the app_id is already taken.
+	ErrAppExists = errors.New("app already exists")
 )
 
 // Store defines the storage interface for SimpleAuth. Both BoltDB and
@@ -30,6 +32,13 @@ type Store interface {
 	ListUsers() ([]*User, error)
 	MergeUsers(sourceGUIDs []string, displayName, email string) (*User, error)
 	UnmergeUser(guid string) error
+
+	// Apps (v2 per-app authorization)
+	CreateApp(a *App) error
+	GetApp(appID string) (*App, error)
+	ListApps() ([]*App, error)
+	UpdateApp(a *App) error
+	DeleteApp(appID string) error
 
 	// LDAP Config
 	GetLDAPConfig() (*LDAPConfig, error)

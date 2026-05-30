@@ -2496,3 +2496,41 @@ Many apps use SimpleAuth just for authentication and maintain their own role/per
 ```
 
 Existing users who authenticated before this claim existed will self-heal on their next LDAP or Kerberos login — the claim becomes available automatically, no admin action needed. For local (non-AD) users the claim is absent; fall back to `preferred_username` or `sub`.
+
+---
+
+## Apps (v2 — per-app authorization)
+
+> **Status: v2, in progress (Milestone 1).** Per-app authorization lets one
+> SimpleAuth serve many apps that share a directory but each own their roles,
+> permissions, and allowed users, with audience-scoped tokens. See
+> [V2-DESIGN.md](V2-DESIGN.md) for the full model. Milestone 1 ships the **apps
+> registry** below; per-app roles/assignments and app self-management land in
+> later milestones.
+
+The **root/master admin** registers apps; each app is identified by `app_id` and
+authenticates with `app_secret` (shown once at creation/rotation). All endpoints
+require the master admin key.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/admin/apps` | Register an app → returns it + `app_secret` (once). |
+| `GET` | `/api/admin/apps` | List apps (never returns secrets). |
+| `GET` | `/api/admin/apps/{app_id}` | Get one app. |
+| `PUT` | `/api/admin/apps/{app_id}` | Update name / audience / redirect_uris / cors_origins / require_assignment / allow_local_users / disabled. |
+| `DELETE` | `/api/admin/apps/{app_id}` | Delete an app. |
+| `POST` | `/api/admin/apps/{app_id}/rotate-secret` | Issue a new `app_secret` (returned once). |
+
+```bash
+curl -X POST https://auth.example.com/sauth/api/admin/apps \
+  -H "Authorization: Bearer $AUTH_ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Billing","audience":"billing","redirect_uris":["https://billing.corp/cb"],"require_assignment":true,"allow_local_users":false}'
+# → { "app_id": "billing", "audience": "billing", ..., "app_secret": "sa_app_…" }  ← secret shown once
+```
+
+Fields: `app_id` (optional — derived from `name` if omitted; lowercase
+`[a-z0-9_-]`, ≤64), `audience` (defaults to `app_id`), `redirect_uris`,
+`cors_origins`, `require_assignment` (default `false`), `allow_local_users`
+(default `false`). On first v2 startup a **default app** is auto-created from your
+existing single-client config so v1 deployments keep working unchanged.
