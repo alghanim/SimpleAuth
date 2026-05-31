@@ -11,13 +11,27 @@ export interface SimpleAuthOptions {
   /** Admin API key for admin operations */
   adminKey?: string;
   /**
+   * App (OAuth client) identifier. Required for the v2 per-app management API
+   * (`/api/app/*`). Combined with `appSecret`, sent as HTTP Basic auth.
+   */
+  appId?: string;
+  /**
+   * App secret paired with `appId`. Required for the v2 per-app management API.
+   * Treat as a credential — never embed in browser code.
+   */
+  appSecret?: string;
+  /**
    * If set, verify() requires the token's `iss` claim to equal this value.
    * Leave undefined to skip the issuer check. Note: direct login/refresh
    * tokens are issued with iss="simpleauth"; OIDC code-flow tokens use the
    * realm URL.
    */
   expectedIssuer?: string;
-  /** If set, verify() requires this value to be present in the `aud` claim. */
+  /**
+   * If set, verify() requires this value to be present in the `aud` claim.
+   * In v2 each app sets this to its own audience so verify() rejects tokens
+   * minted for other apps.
+   */
   audience?: string;
 }
 
@@ -55,6 +69,84 @@ export interface User {
   disabled?: boolean;
   created_at?: string;
   updated_at?: string;
+}
+
+// ---------------------------------------------------------------------------
+// v2 per-app management types (/api/app/*)
+// ---------------------------------------------------------------------------
+
+/**
+ * A single bootstrap assignment binding either a directory `user` or a `group`
+ * to a list of roles. Exactly one of `user` / `group` is set.
+ */
+export type BootstrapAssignment =
+  | { user: string; group?: never; roles: string[] }
+  | { group: string; user?: never; roles: string[] };
+
+/**
+ * Idempotent authz-as-code spec for `POST /api/app/bootstrap`. Safe to send on
+ * every deploy — declares the app's roles, permissions, role→permission map,
+ * and user/group→role assignments. All fields are optional.
+ */
+export interface BootstrapSpec {
+  roles?: string[];
+  permissions?: string[];
+  /** Map of role name → permissions granted by that role. */
+  role_permissions?: Record<string, string[]>;
+  /** User/group → role assignments. */
+  assignments?: BootstrapAssignment[];
+}
+
+/**
+ * The app's current authorization, as returned by `GET /api/app/authz` and
+ * accepted by `PUT /api/app/authz`.
+ */
+export interface AppAuthz {
+  app_id: string;
+  roles: string[];
+  permissions: string[];
+  /** Map of role name → permissions granted by that role. */
+  role_permissions: Record<string, string[]>;
+  /** User reference (GUID, sAMAccountName, or username) → roles. */
+  user_assignments: Record<string, string[]>;
+  /** Group identifier → roles. */
+  group_assignments: Record<string, string[]>;
+}
+
+/**
+ * Read-only view of an app's settings from `GET /api/app/settings`.
+ * Field set mirrors the app registry; extra fields are preserved.
+ */
+export interface AppSettings {
+  app_id: string;
+  name?: string;
+  audience?: string;
+  redirect_uris?: string[];
+  cors_origins?: string[];
+  require_assignment?: boolean;
+  allow_local_users?: boolean;
+  disabled?: boolean;
+  [key: string]: unknown;
+}
+
+/** An app-local user as returned by `GET /api/app/users`. */
+export interface LocalUser {
+  guid: string;
+  username: string;
+  display_name?: string;
+  email?: string;
+  roles?: string[];
+  created_at?: string;
+  updated_at?: string;
+}
+
+/** Options for creating an app-local user via `POST /api/app/users`. */
+export interface CreateLocalUserOptions {
+  username: string;
+  password: string;
+  display_name?: string;
+  email?: string;
+  roles?: string[];
 }
 
 export interface SimpleAuthUser {
@@ -372,6 +464,8 @@ class JWKSCache {
 export class SimpleAuth {
   private readonly url: string;
   private readonly adminKey?: string;
+  private readonly appId?: string;
+  private readonly appSecret?: string;
   private readonly expectedIssuer?: string;
   private readonly audience?: string;
   private readonly jwksCache: JWKSCache;
@@ -380,6 +474,8 @@ export class SimpleAuth {
     // Strip trailing slash
     this.url = options.url.replace(/\/+$/, '');
     this.adminKey = options.adminKey;
+    this.appId = options.appId;
+    this.appSecret = options.appSecret;
     this.expectedIssuer = options.expectedIssuer;
     this.audience = options.audience;
 
@@ -393,6 +489,20 @@ export class SimpleAuth {
       throw new SimpleAuthError('adminKey is required for admin operations', 401);
     }
     return 'Bearer ' + this.adminKey;
+  }
+
+  /** Build HTTP Basic header from app_id:app_secret for the /api/app/* surface */
+  private appAuthHeader(): string {
+    if (!this.appId || !this.appSecret) {
+      throw new SimpleAuthError('appId and appSecret are required for app management operations', 401);
+    }
+    const raw = `${this.appId}:${this.appSecret}`;
+    // Match the file's base64 strategy: btoa in browsers/modern Node, Buffer fallback.
+    const encoded =
+      typeof globalThis.btoa === 'function'
+        ? globalThis.btoa(raw)
+        : Buffer.from(raw, 'utf-8').toString('base64');
+    return 'Basic ' + encoded;
   }
 
   // -------------------------------------------------------------------------
@@ -650,6 +760,192 @@ export class SimpleAuth {
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
       throw new SimpleAuthError(err.error ?? 'Failed to set permissions', resp.status);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // App self-management (v2) — require appId + appSecret (HTTP Basic)
+  //
+  // The /api/app/* surface is scoped entirely to the calling app: the app_id
+  // comes from the credential, never the path, so an app can only ever read or
+  // write its own roles, permissions, assignments, and local users.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Idempotently declare this app's roles, permissions, role→permission map,
+   * and user/group→role assignments via `POST /api/app/bootstrap`.
+   *
+   * Safe to call on every deploy. Requires appId + appSecret.
+   */
+  async appBootstrap(spec: BootstrapSpec): Promise<void> {
+    const resp = await fetch(`${this.url}/api/app/bootstrap`, {
+      method: 'POST',
+      headers: {
+        Authorization: this.appAuthHeader(),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(spec),
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new SimpleAuthError(
+        err.error_description ?? err.error ?? 'App bootstrap failed',
+        resp.status,
+        err.error,
+        err.error_description,
+      );
+    }
+  }
+
+  /**
+   * Read this app's current authorization (roles, permissions, role→permission
+   * map, and user/group assignments) via `GET /api/app/authz`.
+   *
+   * Requires appId + appSecret.
+   */
+  async getAppAuthz(): Promise<AppAuthz> {
+    const resp = await fetch(`${this.url}/api/app/authz`, {
+      headers: { Authorization: this.appAuthHeader() },
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new SimpleAuthError(err.error ?? 'Failed to get app authz', resp.status);
+    }
+
+    return resp.json();
+  }
+
+  /**
+   * Replace this app's authorization via `PUT /api/app/authz`.
+   *
+   * Requires appId + appSecret.
+   */
+  async setAppAuthz(authz: AppAuthz): Promise<void> {
+    const resp = await fetch(`${this.url}/api/app/authz`, {
+      method: 'PUT',
+      headers: {
+        Authorization: this.appAuthHeader(),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(authz),
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new SimpleAuthError(err.error ?? 'Failed to set app authz', resp.status);
+    }
+  }
+
+  /**
+   * Read this app's settings (read-only policy view) via `GET /api/app/settings`.
+   *
+   * Requires appId + appSecret.
+   */
+  async appSettings(): Promise<AppSettings> {
+    const resp = await fetch(`${this.url}/api/app/settings`, {
+      headers: { Authorization: this.appAuthHeader() },
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new SimpleAuthError(err.error ?? 'Failed to get app settings', resp.status);
+    }
+
+    return resp.json();
+  }
+
+  /**
+   * Create an app-local user via `POST /api/app/users`. Only available when the
+   * app has `allow_local_users` enabled.
+   *
+   * Requires appId + appSecret.
+   */
+  async createLocalUser(opts: CreateLocalUserOptions): Promise<LocalUser> {
+    const resp = await fetch(`${this.url}/api/app/users`, {
+      method: 'POST',
+      headers: {
+        Authorization: this.appAuthHeader(),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(opts),
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new SimpleAuthError(
+        err.error_description ?? err.error ?? 'Failed to create local user',
+        resp.status,
+        err.error,
+        err.error_description,
+      );
+    }
+
+    return resp.json();
+  }
+
+  /**
+   * List this app's local users via `GET /api/app/users`.
+   *
+   * Requires appId + appSecret.
+   */
+  async listLocalUsers(): Promise<LocalUser[]> {
+    const resp = await fetch(`${this.url}/api/app/users`, {
+      headers: { Authorization: this.appAuthHeader() },
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new SimpleAuthError(err.error ?? 'Failed to list local users', resp.status);
+    }
+
+    return resp.json();
+  }
+
+  /**
+   * Delete an app-local user (must be owned by this app) via
+   * `DELETE /api/app/users/{guid}`.
+   *
+   * Requires appId + appSecret.
+   */
+  async deleteLocalUser(guid: string): Promise<void> {
+    const resp = await fetch(
+      `${this.url}/api/app/users/${encodeURIComponent(guid)}`,
+      {
+        method: 'DELETE',
+        headers: { Authorization: this.appAuthHeader() },
+      },
+    );
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new SimpleAuthError(err.error ?? 'Failed to delete local user', resp.status);
+    }
+  }
+
+  /**
+   * Reset an app-local user's password via
+   * `PUT /api/app/users/{guid}/password`.
+   *
+   * Requires appId + appSecret.
+   */
+  async setLocalUserPassword(guid: string, password: string): Promise<void> {
+    const resp = await fetch(
+      `${this.url}/api/app/users/${encodeURIComponent(guid)}/password`,
+      {
+        method: 'PUT',
+        headers: {
+          Authorization: this.appAuthHeader(),
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ password }),
+      },
+    );
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new SimpleAuthError(err.error ?? 'Failed to set local user password', resp.status);
     }
   }
 

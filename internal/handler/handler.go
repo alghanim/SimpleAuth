@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"simpleauth/internal/auth"
@@ -30,6 +31,9 @@ type Handler struct {
 	// the LDAP bind password). Loaded from <data_dir>/secret.key. May be nil if
 	// the key could not be loaded; legacy plaintext still reads in that case.
 	secretKey []byte
+	// localUserMu serializes app-local user provisioning so the existence check
+	// and the create+mapping are atomic (L3).
+	localUserMu sync.Mutex
 }
 
 func New(cfg *config.Config, s store.Store, jwtMgr *auth.JWTManager, uiFS fs.FS, version string) *Handler {
@@ -227,6 +231,29 @@ func (h *Handler) registerRoutes(uiFS fs.FS) {
 	h.mux.HandleFunc("GET /api/admin/roles", h.requireMasterAdmin(h.handleListAllRoles))
 	h.mux.HandleFunc("GET /api/admin/permissions", h.requireMasterAdmin(h.handleListAllPermissions))
 	h.mux.HandleFunc("PUT /api/admin/permissions", h.requireMasterAdmin(h.handleSetDefinedPermissions))
+
+	// Admin: Apps (v2 per-app authorization — registry)
+	h.mux.HandleFunc("POST /api/admin/apps", h.requireMasterAdmin(h.handleCreateApp))
+	h.mux.HandleFunc("GET /api/admin/apps", h.requireMasterAdmin(h.handleListApps))
+	h.mux.HandleFunc("GET /api/admin/apps/{app_id}", h.requireMasterAdmin(h.handleGetApp))
+	h.mux.HandleFunc("PUT /api/admin/apps/{app_id}", h.requireMasterAdmin(h.handleUpdateApp))
+	h.mux.HandleFunc("DELETE /api/admin/apps/{app_id}", h.requireMasterAdmin(h.handleDeleteApp))
+	h.mux.HandleFunc("POST /api/admin/apps/{app_id}/rotate-secret", h.requireMasterAdmin(h.handleRotateAppSecret))
+	h.mux.HandleFunc("GET /api/admin/apps/{app_id}/authz", h.requireMasterAdmin(h.handleGetAppAuthz))
+	h.mux.HandleFunc("PUT /api/admin/apps/{app_id}/authz", h.requireMasterAdmin(h.handleSetAppAuthz))
+
+	// App self-service (v2) — authed by app_id/app_secret (Basic) or an
+	// app-management token from POST /api/app/token. Scoped to the calling app.
+	h.mux.HandleFunc("POST /api/app/token", h.handleAppToken)
+	h.mux.HandleFunc("POST /api/app/bootstrap", h.requireApp(h.handleAppBootstrap))
+	h.mux.HandleFunc("GET /api/app/authz", h.requireApp(h.handleGetOwnAuthz))
+	h.mux.HandleFunc("PUT /api/app/authz", h.requireApp(h.handleSetOwnAuthz))
+	h.mux.HandleFunc("GET /api/app/settings", h.requireApp(h.handleAppSettings))
+	// App-local users (v2 M5) — provisioning, gated by allow_local_users.
+	h.mux.HandleFunc("POST /api/app/users", h.requireApp(h.handleCreateLocalUser))
+	h.mux.HandleFunc("GET /api/app/users", h.requireApp(h.handleListLocalUsers))
+	h.mux.HandleFunc("DELETE /api/app/users/{guid}", h.requireApp(h.handleDeleteLocalUser))
+	h.mux.HandleFunc("PUT /api/app/users/{guid}/password", h.requireApp(h.handleSetLocalUserPassword))
 
 	// Admin: Bootstrap
 	h.mux.HandleFunc("POST /api/admin/bootstrap", h.requireMasterAdmin(h.handleBootstrap))

@@ -41,6 +41,8 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
+		AppID    string `json:"app_id"`
+		ClientID string `json:"client_id"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
@@ -51,9 +53,21 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("[login] Attempt user=%q ip=%s", req.Username, ip)
+	// Resolve the app this token is for (v2 audience-scoped tokens). An empty
+	// app_id/client_id resolves to the default app.
+	clientID := req.AppID
+	if clientID == "" {
+		clientID = req.ClientID
+	}
+	app, err := h.resolveApp(clientID)
+	if err != nil {
+		jsonError(w, "unknown app", http.StatusBadRequest)
+		return
+	}
 
-	userGUID, ldapGroups, err := h.authenticateUser(req.Username, req.Password)
+	log.Printf("[login] Attempt user=%q app=%q ip=%s", req.Username, app.AppID, ip)
+
+	userGUID, ldapGroups, err := h.authenticateUser(req.Username, req.Password, app)
 	if err != nil {
 		log.Printf("[login] Failed user=%q ip=%s reason=%q", req.Username, ip, err.Error())
 		h.audit("login_failed", "", ip, map[string]interface{}{"username": req.Username, "reason": err.Error()})
@@ -79,9 +93,12 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	// Check force password change — still issue tokens but flag the response
 	if finalUser.ForcePasswordChange {
-		roles, _ := h.store.GetUserRoles(finalUser.GUID)
-		perms := h.resolveUserPermissions(finalUser.GUID, roles)
-		accessToken, refreshToken, expiresIn, err := h.issueTokenPair(finalUser, roles, perms, ldapGroups)
+		roles, perms, denied := h.resolveTokenRoles(app, finalUser)
+		if denied {
+			jsonError(w, "access denied: not assigned to this app", http.StatusForbidden)
+			return
+		}
+		accessToken, refreshToken, expiresIn, err := h.issueTokenPair(finalUser, roles, perms, ldapGroups, app)
 		if err != nil {
 			jsonError(w, "token generation failed", http.StatusInternalServerError)
 			return
@@ -98,18 +115,41 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Issue tokens
-	h.issueTokenResponse(w, finalUser, ldapGroups, ip)
+	h.issueTokenResponse(w, finalUser, ldapGroups, ip, app)
 }
 
 // authenticateUser performs the full auth flow and returns (userGUID, ldapGroups, error).
 // Flow: local first -> LDAP fallback. Local users are SimpleAuth's own — they always take priority.
 // On successful LDAP auth, user profile is synced from the LDAP result.
-func (h *Handler) authenticateUser(username, password string) (string, []string, error) {
+func (h *Handler) authenticateUser(username, password string, app *store.App) (string, []string, error) {
 	var userGUID string
 	var ldapGroups []string
 	var ldapResult *auth.LDAPResult
 	var authenticated bool
 	var localUser *store.User // track for lockout accounting
+
+	// Step 0: app-local users (v2 M5). At a given app, an app-local user of the
+	// same name shadows any directory user — a customer named like an employee
+	// never inherits employee access. App-local users authenticate locally only.
+	if app != nil {
+		if guid, err := h.store.ResolveMapping("applocal:"+app.AppID, username); err == nil {
+			user, uerr := h.store.ResolveUser(guid)
+			if uerr == nil && user.OwnerAppID == app.AppID {
+				if user.Disabled {
+					return "", nil, fmt.Errorf("account disabled")
+				}
+				if h.isAccountLocked(user) {
+					return "", nil, fmt.Errorf("account locked")
+				}
+				if user.PasswordHash != "" && auth.CheckPassword(user.PasswordHash, password) {
+					log.Printf("[auth] App-local auth success user=%q app=%q guid=%s", username, app.AppID, user.GUID)
+					return user.GUID, nil, nil
+				}
+				h.recordFailedLogin(user)
+				return "", nil, fmt.Errorf("invalid credentials")
+			}
+		}
+	}
 
 	// Step 1: Try local identity mapping + password (local users always take priority)
 	guid, err := h.store.ResolveMapping("local", username)
@@ -290,6 +330,15 @@ func (h *Handler) syncUserFromLDAP(user *store.User, result *auth.LDAPResult) {
 		user.SAMAccountName = result.Username
 		changed = true
 	}
+	// Persist the user's directory groups so per-app group assignments (v2 M3)
+	// can be resolved at token issuance in every flow (not just the live login).
+	// sync runs only after a successful bind, so an EMPTY group list is
+	// authoritative: a user removed from all groups must have the stale set cleared,
+	// otherwise group-derived per-app roles persist after de-grouping (M13).
+	if strings.Join(result.Groups, "\x00") != strings.Join(user.Groups, "\x00") {
+		user.Groups = result.Groups
+		changed = true
+	}
 	if changed {
 		h.store.UpdateUser(user)
 	}
@@ -306,11 +355,14 @@ func (h *Handler) syncUserFromLDAP(user *store.User, result *auth.LDAPResult) {
 	}
 }
 
-func (h *Handler) issueTokenResponse(w http.ResponseWriter, user *store.User, groups []string, ip string) {
-	roles, _ := h.store.GetUserRoles(user.GUID)
-	perms := h.resolveUserPermissions(user.GUID, roles)
+func (h *Handler) issueTokenResponse(w http.ResponseWriter, user *store.User, groups []string, ip string, app *store.App) {
+	roles, perms, denied := h.resolveTokenRoles(app, user)
+	if denied {
+		jsonError(w, "access denied: not assigned to this app", http.StatusForbidden)
+		return
+	}
 
-	accessToken, refreshToken, expiresIn, err := h.issueTokenPair(user, roles, perms, groups)
+	accessToken, refreshToken, expiresIn, err := h.issueTokenPair(user, roles, perms, groups, app)
 	if err != nil {
 		jsonError(w, "token generation failed", http.StatusInternalServerError)
 		return
@@ -327,7 +379,9 @@ func (h *Handler) issueTokenResponse(w http.ResponseWriter, user *store.User, gr
 }
 
 // issueTokenPair creates access + refresh tokens and stores the refresh token.
-func (h *Handler) issueTokenPair(user *store.User, roles []string, perms []string, groups []string) (string, string, int, error) {
+// When app is non-nil the access token is stamped with the app's audience and
+// the refresh token is bound to that app (v2 audience-scoped tokens).
+func (h *Handler) issueTokenPair(user *store.User, roles []string, perms []string, groups []string, app *store.App) (string, string, int, error) {
 	claims := auth.Claims{
 		GUID:              user.GUID,
 		Name:              user.DisplayName,
@@ -342,6 +396,11 @@ func (h *Handler) issueTokenPair(user *store.User, roles []string, perms []strin
 		PreferredUsername: h.resolvePreferredUsername(user),
 	}
 	claims.Subject = user.GUID
+	aud := ""
+	if app != nil {
+		aud = appAudience(app)
+		claims.Audience = []string{aud}
+	}
 
 	accessToken, err := h.jwt.IssueAccessToken(claims, h.cfg.AccessTTL)
 	if err != nil {
@@ -359,6 +418,10 @@ func (h *Handler) issueTokenPair(user *store.User, roles []string, perms []strin
 		UserGUID:  user.GUID,
 		ExpiresAt: time.Now().UTC().Add(h.cfg.RefreshTTL),
 		CreatedAt: time.Now().UTC(),
+	}
+	if app != nil {
+		rt.AppID = app.AppID
+		rt.Audience = aud
 	}
 	// Persist before returning the pair: if the refresh row is not stored, the
 	// client would receive a refresh token that can never be redeemed.
@@ -476,9 +539,21 @@ func (h *Handler) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Issue new tokens (same family)
-	roles, _ := h.store.GetUserRoles(user.GUID)
-	perms := h.resolveUserPermissions(user.GUID, roles)
+	// Refresh stays bound to the app the token was issued for (v2). Re-resolve the
+	// app so a disabled/deleted app stops minting tokens (M10), and recompute the
+	// per-app roles + the require_assignment gate instead of carrying the user's
+	// GLOBAL roles — using global roles here let a scoped token escalate on refresh
+	// (H5).
+	app, err := h.resolveApp(storedRT.AppID)
+	if err != nil {
+		jsonError(w, "app unavailable", http.StatusUnauthorized)
+		return
+	}
+	roles, perms, denied := h.resolveTokenRoles(app, user)
+	if denied {
+		jsonError(w, "access denied: not assigned to this app", http.StatusForbidden)
+		return
+	}
 
 	newClaims := auth.Claims{
 		GUID:              user.GUID,
@@ -493,6 +568,10 @@ func (h *Handler) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		PreferredUsername: h.resolvePreferredUsername(user),
 	}
 	newClaims.Subject = user.GUID
+	// Refresh stays bound to the same app (v2): re-stamp the original audience.
+	if storedRT.Audience != "" {
+		newClaims.Audience = []string{storedRT.Audience}
+	}
 
 	accessToken, err := h.jwt.IssueAccessToken(newClaims, h.cfg.AccessTTL)
 	if err != nil {
@@ -512,6 +591,8 @@ func (h *Handler) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		UserGUID:  user.GUID,
 		ExpiresAt: time.Now().UTC().Add(h.cfg.RefreshTTL),
 		CreatedAt: time.Now().UTC(),
+		AppID:     storedRT.AppID,
+		Audience:  storedRT.Audience,
 	}
 	if err := h.store.SaveRefreshToken(newRT); err != nil {
 		jsonError(w, "refresh token generation failed", http.StatusInternalServerError)
@@ -577,6 +658,7 @@ func (h *Handler) handleUserInfo(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleImpersonate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		TargetGUID string `json:"target_guid"`
+		AppID      string `json:"app_id"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
@@ -593,8 +675,16 @@ func (h *Handler) handleImpersonate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	roles, _ := h.store.GetUserRoles(target.GUID)
-	perms := h.resolveUserPermissions(target.GUID, roles)
+	// Scope the impersonation token to an app so it carries an audience and the
+	// target's per-app roles, instead of an aud-less token with global roles that
+	// validates anywhere aud is not checked (L2). app_id is optional — absent means
+	// the default app (whose authz falls back to the global roles, as before).
+	app, err := h.resolveApp(req.AppID)
+	if err != nil {
+		jsonError(w, "unknown app", http.StatusBadRequest)
+		return
+	}
+	roles, perms, _ := h.resolveTokenRoles(app, target)
 
 	// Get admin GUID from the Authorization header (it's the master key, so we use "admin")
 	adminActor := "admin"
@@ -614,6 +704,7 @@ func (h *Handler) handleImpersonate(w http.ResponseWriter, r *http.Request) {
 		ImpersonatedBy:    adminActor,
 	}
 	claims.Subject = target.GUID
+	claims.Audience = []string{appAudience(app)}
 
 	accessToken, err := h.jwt.IssueAccessToken(claims, h.cfg.ImpersonateTTL)
 	if err != nil {
@@ -654,6 +745,14 @@ func (h *Handler) validateAccessToken(tokenStr string) (*auth.Claims, error) {
 	claims, err := h.jwt.ValidateToken(tokenStr)
 	if err != nil {
 		return nil, err
+	}
+	// App-management tokens (minted by /api/app/token, typ="app-mgmt") are NOT user
+	// access tokens. They are accepted only by authenticateApp for the /api/app/*
+	// surface; reject them at every user-resource boundary so a management
+	// credential cannot read user profiles via userinfo/introspection or act as a
+	// user — including the case where an app_id collides with a user GUID (H7).
+	if claims.Typ == "app-mgmt" {
+		return nil, fmt.Errorf("not a user access token")
 	}
 	// Check user-level revocation (admin revoked all sessions)
 	if revoked, _ := h.store.IsUserAccessRevoked(claims.Subject); revoked {
@@ -811,15 +910,12 @@ func (h *Handler) handleNegotiate(w http.ResponseWriter, r *http.Request) {
 		userGUID, err = h.store.ResolveMapping("kerberos", username)
 	}
 	if err != nil {
-		// Auto-provision: look for a user with matching display name
+		// Auto-provision: look for a directory user with matching display name/email.
 		users, _ := h.store.ListUsers()
-		for _, u := range users {
-			if u.DisplayName == username || u.Email == username {
-				userGUID = u.GUID
-				// Create identity mapping for next time
-				h.store.SetIdentityMapping("kerberos", cname, userGUID)
-				break
-			}
+		if guid := matchAutoProvisionUser(users, username); guid != "" {
+			userGUID = guid
+			// Create identity mapping for next time
+			h.store.SetIdentityMapping("kerberos", cname, userGUID)
 		}
 		if userGUID == "" {
 			h.audit("negotiate_failed", "", ip, map[string]interface{}{
@@ -843,10 +939,20 @@ func (h *Handler) handleNegotiate(w http.ResponseWriter, r *http.Request) {
 	// Assign default roles if user has none
 	h.assignDefaultRoles(user.GUID)
 
-	// Issue tokens
-	roles, _ := h.store.GetUserRoles(user.GUID)
-	perms := h.resolveUserPermissions(user.GUID, roles)
-	accessToken, refreshToken, expiresIn, err := h.issueTokenPair(user, roles, perms, nil)
+	// Resolve the app (v2) — optional client_id query, else default app.
+	app, err := h.resolveApp(r.URL.Query().Get("client_id"))
+	if err != nil {
+		jsonError(w, "unknown app", http.StatusBadRequest)
+		return
+	}
+
+	// Issue tokens (per-app roles + require_assignment, v2 M3)
+	roles, perms, denied := h.resolveTokenRoles(app, user)
+	if denied {
+		jsonError(w, "access denied: not assigned to this app", http.StatusForbidden)
+		return
+	}
+	accessToken, refreshToken, expiresIn, err := h.issueTokenPair(user, roles, perms, nil, app)
 	if err != nil {
 		jsonError(w, "token generation failed", http.StatusInternalServerError)
 		return
@@ -996,8 +1102,16 @@ func (h *Handler) handleSSOLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	redirectURI := r.URL.Query().Get("redirect_uri")
 
-	// Validate redirect_uri
-	if redirectURI != "" && !isAllowedRedirect(h.getRedirectURIs(), redirectURI) {
+	// Resolve the app (v2) and validate redirect_uri against ITS allowlist — per-app
+	// redirect_uris are authoritative (falling back to the global list). Validating
+	// only against the global list let an app-scoped token be delivered to a URI the
+	// app itself never authorized (L1).
+	app, err := h.resolveApp(r.URL.Query().Get("client_id"))
+	if err != nil {
+		http.Error(w, "unknown app", http.StatusBadRequest)
+		return
+	}
+	if redirectURI != "" && !h.appAllowsRedirect(app, redirectURI) {
 		http.Error(w, "redirect_uri not allowed", http.StatusBadRequest)
 		return
 	}
@@ -1101,9 +1215,13 @@ func (h *Handler) handleSSOLogin(w http.ResponseWriter, r *http.Request) {
 
 	h.assignDefaultRoles(user.GUID)
 
-	roles, _ := h.store.GetUserRoles(user.GUID)
-	perms := h.resolveUserPermissions(user.GUID, roles)
-	accessToken, refreshToken, expiresIn, err := h.issueTokenPair(user, roles, perms, ldapGroups)
+	// app was resolved + redirect validated at the top of the handler (L1).
+	roles, perms, denied := h.resolveTokenRoles(app, user)
+	if denied {
+		h.redirectToLoginError(w, r, redirectURI, "Access denied: not assigned to this app")
+		return
+	}
+	accessToken, refreshToken, expiresIn, err := h.issueTokenPair(user, roles, perms, ldapGroups, app)
 	if err != nil {
 		h.redirectToLoginError(w, r, redirectURI, "Token generation failed")
 		return
@@ -1135,6 +1253,7 @@ func (h *Handler) handleSSOLogin(w http.ResponseWriter, r *http.Request) {
 		ac := &store.OIDCAuthCode{
 			Code:                code,
 			UserGUID:            user.GUID,
+			AppID:               app.AppID,
 			RedirectURI:         redirectURI,
 			Nonce:               nonce,
 			CodeChallenge:       codeChallenge,

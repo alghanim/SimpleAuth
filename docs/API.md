@@ -2496,3 +2496,171 @@ Many apps use SimpleAuth just for authentication and maintain their own role/per
 ```
 
 Existing users who authenticated before this claim existed will self-heal on their next LDAP or Kerberos login — the claim becomes available automatically, no admin action needed. For local (non-AD) users the claim is absent; fall back to `preferred_username` or `sub`.
+
+---
+
+## Apps (v2 — per-app authorization)
+
+> **Status: v2, in progress (Milestone 1).** Per-app authorization lets one
+> SimpleAuth serve many apps that share a directory but each own their roles,
+> permissions, and allowed users, with audience-scoped tokens. See
+> [V2-DESIGN.md](V2-DESIGN.md) for the full model. Milestone 1 ships the **apps
+> registry** below; per-app roles/assignments and app self-management land in
+> later milestones.
+
+The **root/master admin** registers apps; each app is identified by `app_id` and
+authenticates with `app_secret` (shown once at creation/rotation). All endpoints
+require the master admin key.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/admin/apps` | Register an app → returns it + `app_secret` (once). |
+| `GET` | `/api/admin/apps` | List apps (never returns secrets). |
+| `GET` | `/api/admin/apps/{app_id}` | Get one app. |
+| `PUT` | `/api/admin/apps/{app_id}` | Update name / audience / redirect_uris / cors_origins / require_assignment / allow_local_users / disabled. |
+| `DELETE` | `/api/admin/apps/{app_id}` | Delete an app. |
+| `POST` | `/api/admin/apps/{app_id}/rotate-secret` | Issue a new `app_secret` (returned once). |
+
+```bash
+curl -X POST https://auth.example.com/sauth/api/admin/apps \
+  -H "Authorization: Bearer $AUTH_ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Billing","audience":"billing","redirect_uris":["https://billing.corp/cb"],"require_assignment":true,"allow_local_users":false}'
+# → { "app_id": "billing", "audience": "billing", ..., "app_secret": "sa_app_…" }  ← secret shown once
+```
+
+Fields: `app_id` (optional — derived from `name` if omitted; lowercase
+`[a-z0-9_-]`, ≤64), `audience` (defaults to `app_id`), `redirect_uris`,
+`cors_origins`, `require_assignment` (default `false`), `allow_local_users`
+(default `false`). On first v2 startup a **default app** is auto-created from your
+existing single-client config so v1 deployments keep working unchanged.
+
+### Audience-scoped tokens (Milestone 2)
+
+Tokens are now **scoped to one app**. A token minted for app A carries `aud: "A"`
+and is rejected by every other app — verify it client-side with the SDK
+`audience` option (set `audience` to your app's id/audience).
+
+- **Direct login** accepts an `app_id` (or `client_id`) field; the issued token's
+  `aud` is that app. Omit it and you get the **default app**.
+  ```bash
+  curl -X POST …/sauth/api/auth/login -H "Content-Type: application/json" \
+    -d '{"username":"alice","password":"secret","app_id":"billing"}'
+  # access_token aud = "billing"
+  ```
+- **OIDC** uses `client_id` to select the app; `aud`, `azp`, and the
+  `resource_access` key are the app. The app's own `redirect_uris` are honored
+  when set (falling back to the global allowlist).
+- **Refresh** stays bound to the app the family was issued for — a refresh of an
+  app-A token only ever mints app-A tokens.
+
+> Note: in Milestone 2 the `aud` is per-app but the **role contents** are still
+> global. Per-app roles/permissions/assignments arrive in Milestone 3.
+
+### Per-app roles & assignments (Milestone 3)
+
+Each app owns its **roles**, **role→permission map**, and **assignments**
+(which users/groups get which roles). A token's `roles`/`permissions` (and
+`resource_access[app]`) are resolved **per app** at login — so the same user can
+be `admin` in one app and `viewer` (or nothing) in another.
+
+Master admin manages it (app self-service via the app credential arrives in a
+later milestone):
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/admin/apps/{app_id}/authz` | Read the app's roles / role_permissions / assignments. |
+| `PUT` | `/api/admin/apps/{app_id}/authz` | Replace them. |
+
+```bash
+curl -X PUT …/sauth/api/admin/apps/billing/authz \
+  -H "Authorization: Bearer $AUTH_ADMIN_KEY" -H "Content-Type: application/json" \
+  -d '{
+        "roles": ["admin","viewer"],
+        "role_permissions": { "admin": ["invoice:write"], "viewer": ["invoice:read"] },
+        "user_assignments":  { "jsmith": ["viewer"] },
+        "group_assignments": { "Finance": ["admin"] }
+      }'
+```
+
+- **`user_assignments`** is keyed by a user reference — GUID, sAMAccountName, or
+  username (any is matched at login).
+- **`group_assignments`** is keyed by the group identifier captured from the
+  directory at login (sAMAccountName by default; configurable). A user's groups
+  are refreshed on each LDAP/Kerberos login.
+- **`require_assignment`** (per app): when true, a directory user with no direct
+  or group assignment is **denied** a token (`403` / `access_denied`).
+- **Back-compat:** an app with no per-app authz defined falls back to the global
+  (v1) roles, so existing single-app deployments are unaffected until they opt in.
+
+### App self-service (Milestone 4)
+
+Apps manage their **own** authorization with their `app_id`/`app_secret` — no
+master key. Authenticate either with **HTTP Basic** (`app_id:app_secret`) or by
+exchanging the secret for a short-lived **app-management token**:
+
+```bash
+# option A: HTTP Basic on every call
+curl -u billing:$APP_SECRET …/sauth/api/app/authz
+
+# option B: exchange once, then Bearer
+TOK=$(curl -s -u billing:$APP_SECRET -X POST …/sauth/api/app/token | jq -r .access_token)
+curl -H "Authorization: Bearer $TOK" …/sauth/api/app/authz
+```
+
+The `app_id` is taken from the credential — there is no app id in the path — so
+an app can only ever read/write **its own** scope.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/app/token` | Exchange `app_id`+`app_secret` (Basic or form) for a management token. |
+| `POST` | `/api/app/bootstrap` | Idempotent authz-as-code — declare roles, role_permissions, assignments. Safe on every deploy. |
+| `GET/PUT` | `/api/app/authz` | Read / replace this app's roles + assignments. |
+| `GET` | `/api/app/settings` | This app's settings (no secret). |
+
+```bash
+curl -u billing:$APP_SECRET -X POST …/sauth/api/app/bootstrap \
+  -H "Content-Type: application/json" \
+  -d '{
+        "roles": ["admin","viewer"],
+        "role_permissions": { "admin": ["invoice:write"], "viewer": ["invoice:read"] },
+        "assignments": [
+          { "group": "Finance", "roles": ["admin"] },
+          { "user":  "jsmith", "roles": ["viewer"] }
+        ]
+      }'
+```
+
+So a developer's whole integration is: get `app_id`/`app_secret` from the admin →
+`bootstrap` roles on deploy → point the SDK at SimpleAuth with `audience` set to
+the app → `verify()`.
+
+### App-local users (Milestone 5)
+
+Apps can own **local users that aren't in your directory** (e.g. a customer
+portal). They authenticate locally, only ever receive `aud=<the app>` tokens,
+are **not** shared via cross-app SSO, and are **exempt** from
+`require_assignment`. Usernames are unique **per app** — `alice` in app A is a
+different person from `alice` in app B — and at a given app an app-local user
+**shadows** any directory user of the same name.
+
+Provisioning requires the app's `allow_local_users` flag and uses the app
+credential (Basic or management token):
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/app/users` | Create an app-local user `{username, password, display_name?, email?, roles?}`. |
+| `GET` | `/api/app/users` | List this app's local users. |
+| `PUT` | `/api/app/users/{guid}/password` | Reset a local user's password. |
+| `DELETE` | `/api/app/users/{guid}` | Delete a local user (must be owned by this app). |
+
+```bash
+curl -u portal:$APP_SECRET -X POST …/sauth/api/app/users \
+  -H "Content-Type: application/json" \
+  -d '{"username":"customer1","password":"…","display_name":"Customer One","roles":["member"]}'
+
+# the customer then logs in scoped to the app
+curl -X POST …/sauth/api/auth/login \
+  -d '{"username":"customer1","password":"…","app_id":"portal"}'
+# token: aud=portal, roles=["member"]
+```

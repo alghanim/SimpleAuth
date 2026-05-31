@@ -58,6 +58,23 @@ source of truth for what is currently open vs. fixed.
 | S3 | Go SDK accepts refresh tokens as access tokens; skips `exp` when absent | MEDIUM | FIXED | 2026-05-30 |
 | I1 | Single static admin key = entire authz model; actions audited as "admin" | INFO | WONTFIX | by design (documented) |
 | I2 | No tests for `internal/auth` / `internal/config` | INFO | PARTIAL | 2026-05-30 (added auth + crypto + PKCE + consume tests) |
+| H5 | v1 `/api/auth/refresh` drops per-app authz → privilege escalation | HIGH | FIXED | 2026-05-31 (branch `v2`) |
+| H6 | `require_assignment` fails open when an app has no per-app authz | HIGH | FIXED | 2026-05-31 (branch `v2`) |
+| H7 | App-management token accepted as a user access token (no `typ` gate) | HIGH | FIXED | 2026-05-31 (branch `v2`) |
+| H8 | `DeleteApp` orphans app-local users → cross-tenant resurrection on app_id reuse | HIGH | FIXED | 2026-05-31 (branch `v2`) |
+| M10 | OIDC refresh nil-derefs on disabled/deleted app; refresh skips app-disable | MEDIUM | FIXED | 2026-05-31 (branch `v2`) |
+| M11 | OIDC `client_credentials`/`password` use the global secret but mint any app's `aud` | MEDIUM | FIXED | 2026-05-31 (branch `v2`) |
+| M12 | Kerberos auto-provision binding hijack via app-set `email`/`display_name` | MEDIUM | FIXED | 2026-05-31 (branch `v2`) |
+| M13 | Group list never cleared when a user leaves all directory groups (stale roles) | MEDIUM | FIXED | 2026-05-31 (branch `v2`) |
+| M14 | Deleting an app-local user leaves a dangling mapping (username unprovisionable) | MEDIUM | FIXED | 2026-05-31 (branch `v2`) |
+| M15 | App-local provisioning + reset bypass the password policy | MEDIUM | FIXED | 2026-05-31 (branch `v2`) |
+| M16 | No rate-limit on `/api/app/token` + `/api/app/*` Basic auth (app_secret brute-force) | MEDIUM | FIXED | 2026-05-31 (branch `v2`) |
+| L1 | `/login/sso` validates `redirect_uri` against the global, not per-app, allowlist | LOW | FIXED | 2026-05-31 (branch `v2`) |
+| L2 | `handleImpersonate` mints an `aud`-less token carrying global roles | LOW | FIXED | 2026-05-31 (branch `v2`) |
+| L3 | App-local user creation TOCTOU (store enforces no username uniqueness) | LOW | FIXED | 2026-05-31 (branch `v2`) |
+| L4 | `rotate-secret` does not revoke outstanding app-management tokens | LOW | FIXED | 2026-05-31 (branch `v2`) |
+| L5 | App-id enumeration via bcrypt timing oracle | LOW | FIXED | 2026-05-31 (branch `v2`) |
+| I3 | Group-derived roles inherently stale on refresh (no directory re-read) | INFO | WONTFIX | by design — see Pass 2 remediation note |
 
 ---
 
@@ -307,4 +324,352 @@ All three SDKs now (a) pin RS256, (b) fail closed on missing `exp`, (c) refuse
 refresh tokens as access tokens, and (d) make issuer/audience validation opt-in so
 `verify()` works against the stock server (login tokens use `iss="simpleauth"`). The
 Python SDK (S1) already followed this model.
+
+---
+
+## Audit Pass 2 — 2026-05-31 — Claude Opus 4.8 (`claude-opus-4-8`)
+
+**Scope:** the **v2 per-app authorization** work on the `v2` branch (NOT yet
+released — these are pre-release findings to fix before merging to `2.0.0`). New
+surface: app registry (`admin_apps.go`), app self-service + app-management tokens
+(`app_selfservice.go`), app/authz resolution + audience scoping (`apps.go`),
+app-local users, the `apps`/`app_authz` store, refresh re-stamping, and the admin
+UI Apps page. The pre-existing v1 surface (Pass 1) was not re-audited here.
+
+**Method:** first-hand read of every v2 file, then three parallel adversarial
+sub-agents (app-credential auth; authz/token scoping; app-local users/store/UI),
+each instructed to refute before reporting. H5 and M11 were confirmed with
+throwaway PoCs (written, run green, deleted). `go build` clean; v2 test suite green
+(the bugs below are mostly in paths the tests don't assert on).
+
+All 17 findings are **OPEN**. None is a v1 regression. The v2 model's core promise
+— "a token for app A is useless on app B, and each app controls its own
+roles/users" — is undermined primarily by H5, H6, and M11.
+
+### H5 — v1 `/api/auth/refresh` drops per-app authz → privilege escalation — HIGH
+**Where:** `internal/handler/auth.go` `handleRefresh` — `roles, _ := h.store.GetUserRoles(user.GUID)` (:540), audience re-stamp (:557-559).
+**Mechanism:** the OIDC refresh path correctly re-resolves the app and calls
+`resolveTokenRoles` + the `denied` check (`oidc.go:607-612`). The legacy
+`/api/auth/refresh` path does **not**: it loads the user's **global** roles, never
+resolves the app, never checks `require_assignment` — yet it still re-stamps
+`storedRT.Audience` so the new token carries `aud=<appB>`. Any user who logs into a
+scoped app (e.g. `roles=[viewer]` at `billing`) and then calls `/api/auth/refresh`
+with that app-bound refresh token receives a token with `aud=[billing]` but
+`roles=[<their global roles, e.g. superadmin>]`. The RP verifies `aud`, trusts
+`roles`, and grants escalated access. Also bypasses `require_assignment`
+de-assignment (a user removed from the app still refreshes successfully).
+**PoC:** login `billing` → `roles=[viewer]`; refresh → `roles=[superadmin] aud=[billing]`. Confirmed.
+**Fix:** in `handleRefresh`, resolve `app` from `storedRT.AppID` and replace the
+global-roles load with `roles, perms, denied := h.resolveTokenRoles(app, user)`;
+return 403 on `denied`; guard nil app (see M10). Mirrors `handleOIDCTokenRefresh`.
+**Breaking:** no (restores intended v2 scoping; only "breaks" the escalation).
+**Note:** existing `TestAudienceScopedTokens` asserts `aud` is preserved on refresh
+but never asserts the *roles* — which is why this slipped through. Add a roles
+assertion.
+
+### H6 — `require_assignment` fails open when an app has no per-app authz — HIGH
+**Where:** `internal/handler/apps.go` `resolveTokenRoles` (:88-96, :125).
+**Mechanism:** when the app has defined no roles/user-assignments/group-assignments
+(`hasPerApp == false`), the function returns the user's **global** roles with
+`denied = false` and returns **before** the `require_assignment` check at :125. So
+an operator who sets `require_assignment: true` (expecting deny-by-default) but has
+not yet populated assignments admits **every** directory user with their global
+roles — the exact opposite of the control they enabled. The deny check only runs on
+the `hasPerApp == true` branch.
+**Fix:** evaluate `require_assignment` independently of `hasPerApp` — if
+`app.RequireAssignment` and the user is not an owner-app-local user and has no
+assignment, deny, regardless of whether the app has defined roles yet. (The
+v1-fallback should apply only when `require_assignment` is false.)
+**Breaking:** yes, intentionally — apps with `require_assignment: true` and no
+assignments will (correctly) start denying. That is the point of the flag.
+
+### H7 — App-management token is accepted as a user access token (no `typ` gate) — HIGH
+**Where:** `internal/handler/auth.go` `validateAccessToken` (:719) and userinfo
+(:598); `internal/handler/oidc.go` userinfo (:784) / introspection (:864). Token
+minted at `app_selfservice.go:72-74` with `Typ:"app-mgmt"`, `Subject:app_id`.
+**Mechanism:** the app-management token is an ordinary RS256 JWT signed by the same
+key as user tokens, and the resource-server validators never check `claims.Typ`. So
+a management token passes `/api/auth/userinfo`, OIDC `/userinfo`,
+`/api/auth/reset-password`, and introspects as `active:true`. Because `app_id` and
+user `GUID` share a namespace (the slug regex `^[a-z0-9][a-z0-9_-]{0,63}$` at
+`admin_apps.go:17` admits any UUID), a master admin can register an app whose
+`app_id` equals a victim's GUID; a management token for it makes
+`ResolveUser(claims.Subject)` return the victim's profile at `/userinfo`. Even
+without the collision, a management credential validating as a user credential is a
+privilege-boundary failure.
+**Refuted (SAFE):** the reverse is blocked — `authenticateApp` strictly requires
+`Typ=="app-mgmt"` (`app_selfservice.go:41`), so user/refresh tokens cannot pass
+`requireApp`; mgmt tokens cannot be used as OIDC refresh tokens nor reach
+`client_credentials`/admin.
+**Fix:** in `validateAccessToken` reject `claims.Typ=="app-mgmt"` (treat management
+tokens as a separate audience/typ that only `authenticateApp` accepts).
+**Breaking:** no (management tokens were never meant to work at user endpoints).
+
+### H8 — `DeleteApp` orphans app-local users + mappings → cross-tenant resurrection — HIGH
+**Where:** `internal/store/bolt.go` `DeleteApp` (:123-131), `internal/store/postgres.go` `DeleteApp` (:180-187); auth at `internal/handler/auth.go` (:135-150).
+**Mechanism:** `DeleteApp` cascades only `app_authz`; it never deletes the `User`
+rows with `OwnerAppID==appID` nor their `applocal:{appID}` identity mappings (no FK
+cascade in the PG schema either). A deleted `app_id` can be re-registered freely,
+possibly by a different owner. On reuse, `authenticateUser` step 0 resolves the
+**old** `applocal:{appID}` mapping, sees `user.OwnerAppID == app.AppID`, and accepts
+the **old account's old password** — the new owner silently inherits accounts (and
+stored password hashes) they never created. With authz cascaded away, those ghosts
+hit the v1-fallback path and `assignDefaultRoles` grants them default roles on the
+new owner's app.
+**Fix:** on `DeleteApp`, enumerate `OwnerAppID==appID` users, delete each user row +
+its `applocal:{appID}` mappings, then delete the app. (Optionally also tombstone
+deleted app_ids to forbid reuse.) Add to both Bolt and Postgres.
+**Breaking:** no.
+
+### M10 — OIDC refresh nil-derefs on a disabled/deleted app; both refresh paths skip app-disable — MEDIUM
+**Where:** `internal/handler/oidc.go` `handleOIDCTokenRefresh` (:607-608);
+`internal/handler/auth.go` `handleRefresh` (no app re-resolution at all).
+**Mechanism:** `app, _ := h.resolveApp(storedRT.AppID)` ignores the error. When the
+app is disabled or deleted, `resolveApp` returns `(nil, err)`, so `app == nil`, and
+`resolveTokenRoles(app, user)` dereferences `app.AppID` → nil-deref → 500 (a
+crash/DoS on a normal client action). Separately, the v1 `handleRefresh` never
+checks `app.Disabled` at all, so **disabling an app does not stop token refresh** —
+the app-disable kill switch is incomplete on the refresh paths (primary issuance
+*does* honor disable via `resolveApp`).
+**Fix:** in both refresh handlers, resolve the app and on error return a clean
+`invalid_grant`/401 (and stop minting tokens for a disabled app); never deref a nil
+app. Folds into the H5 fix for `handleRefresh`.
+**Breaking:** no (refreshing into a disabled/deleted app *should* fail).
+
+### M11 — OIDC `client_credentials`/`password` use the global secret but mint any app's `aud` — MEDIUM
+**Where:** `internal/handler/oidc.go` `requireConfidentialClient` (:130-144),
+`handleOIDCTokenClientCredentials` (:517-538), `handleOIDCTokenPassword` (:460-481).
+**Mechanism:** `requireConfidentialClient` compares only against the single global
+`cfg.ClientSecret`; the handler then does `resolveApp(r.FormValue("client_id"))` and
+sets `sub=app_id, aud=appAudience(app)`. The per-app `App.SecretHash` is never
+consulted. So any holder of the one global secret can mint a `client_credentials`
+machine token — or a `password`-grant user token — scoped to **any** registered
+app's audience by changing `client_id`. The "token for app A is useless on app B"
+guarantee collapses for confidential grants: one shared secret impersonates every
+app. (`password` still runs `resolveTokenRoles`, so its role/`require_assignment`
+logic is intact; the defect is the cross-app `aud` selection. `client_credentials`
+carries no roles, so impact there is the `aud`/`sub=app_id` confusion.)
+**PoC:** `client_id=billing` + global secret → 200 `aud=[billing]`; billing's own
+`app_secret` on the same grant → 401. Confirmed.
+**Fix:** when `client_id` names a real app, authenticate against that app's
+`SecretHash` (`auth.CheckPassword`) instead of the global secret.
+**Breaking:** yes — deployments using the global secret with a non-default
+`client_id` on these grants must switch to the per-app secret. Acceptable per the
+security-over-compat policy.
+
+### M12 — Kerberos auto-provision binding hijack via app-set `email`/`display_name` — MEDIUM
+**Where:** `internal/handler/auth.go` negotiate auto-provision scan (:881-888);
+app-local fields set at `app_selfservice.go:216-218`.
+**Mechanism:** when no `kerberos` identity mapping exists for a verified principal,
+the negotiate flow scans **all** users (`ListUsers()`, which includes app-local
+users) and binds the principal to the first user whose `DisplayName == username` or
+`Email == username`. An app can pre-create an app-local user whose `email` equals a
+target principal's local part; with Kerberos enabled, that app captures the
+principal's first negotiate login onto an app-owned GUID (or pollutes the directory
+user's mapping). Conditional on negotiate being enabled and a name collision; scan
+order is nondeterministic.
+**Fix:** exclude `OwnerAppID != ""` users from the negotiate auto-provision scan
+(app-local users are never directory principals).
+**Breaking:** no.
+
+### M13 — Group list never cleared when a user leaves all directory groups → stale roles — MEDIUM
+**Where:** `internal/handler/auth.go` `syncUserFromLDAP` (:335-338).
+**Mechanism:** the guard `if len(result.Groups) > 0 && …` means when an LDAP/Kerberos
+login returns **zero** groups (user removed from all groups, or `GroupsAttr` unset),
+the previously-cached non-empty `user.Groups` is left intact. `resolveTokenRoles`
+(`apps.go:109-111`) then keeps awarding `GroupAssignments` roles for groups the user
+no longer belongs to, and the stale set is emitted as the JWT `groups` claim.
+(Reducing to a *different non-empty* set updates correctly — only the empty-result
+case is buggy.)
+**Fix:** drop the `len(result.Groups) > 0 &&` condition so an empty result overwrites
+`Groups` (sync runs only after a successful bind, so an empty list is authoritative).
+**Breaking:** no.
+
+### M14 — Deleting an app-local user leaves a dangling mapping (username unprovisionable) — MEDIUM
+**Where:** `internal/handler/app_selfservice.go` `handleDeleteLocalUser` (:269) vs the
+create-time conflict check (:204-208).
+**Mechanism:** delete calls only `store.DeleteUser(guid)`, which removes the user row
+but not the `applocal:{appID}` identity mapping. `handleCreateLocalUser` rejects when
+`ResolveMapping` still resolves that (now stale) mapping, so a just-deleted username
+returns 409 **forever** and leaves a permanently dangling mapping. (Same root pattern
+affects admin `handleDeleteUser` in `admin.go` — pre-existing, out of v2 scope but
+worth a follow-up.)
+**Fix:** in `handleDeleteLocalUser`, resolve the username from `GetMappingsForUser`
+and call `DeleteIdentityMapping("applocal:"+appID, username)` after `DeleteUser`.
+**Breaking:** no.
+
+### M15 — App-local provisioning + reset bypass the password policy — MEDIUM
+**Where:** `internal/handler/app_selfservice.go` create (:209) and reset (:294) call
+`auth.HashPassword` directly with no `auth.ValidatePassword(..., h.passwordPolicy())`.
+**Mechanism:** every other password sink enforces the policy (`admin.go:213`,
+`auth.go:767`); the app-local paths do not, so an app can set
+policy-violating/weak passwords (no complexity, no history check) on identities that
+then authenticate through the normal login flow. (Lockout *is* honored for app-local
+users; only complexity/history are skipped.)
+**Fix:** call `auth.ValidatePassword` in both handlers before hashing.
+**Breaking:** only for apps relying on weak passwords.
+
+### M16 — No rate-limit on `/api/app/token` + `/api/app/*` Basic auth — MEDIUM
+**Where:** `internal/handler/app_selfservice.go` Basic-auth path (:32-48) and
+`handleAppToken` (:57-84) — neither calls `h.loginLimiter.allow(...)`.
+**Mechanism:** unlike `handleLogin`/OIDC token, the app credential surface has no
+per-IP throttle, so `app_id:app_secret` can be hammered without brake (online
+brute-force / DoS). Generated secrets are 24 random bytes (strong), but admins may
+set weak custom secrets, and the absence of any limiter is itself the defect.
+**Fix:** gate both on the existing IP limiter.
+**Breaking:** no.
+
+### L1 — `/login/sso` validates `redirect_uri` against the global, not per-app, allowlist — LOW
+**Where:** `internal/handler/auth.go` `handleSSOLogin` (:1076 uses
+`isAllowedRedirect(h.getRedirectURIs(), …)`), then resolves the app from `client_id`
+and issues an app-scoped token/code to that URI.
+**Mechanism:** the hosted-login and OIDC-authorize paths correctly use
+`appAllowsRedirect(app, …)`; `/login/sso` does not. With `client_id=appB`, a
+`redirect_uri` that is globally allowed but absent from app B's stricter
+`redirect_uris` leaks an app-B-scoped token to a URI app B never authorized
+(bounded by the global allowlist, so the destination is still admin-registered).
+**Fix:** resolve the app earlier and use `h.appAllowsRedirect(app, redirectURI)`.
+**Breaking:** no.
+
+### L2 — `handleImpersonate` mints an `aud`-less token with global roles — LOW
+**Where:** `internal/handler/auth.go` `handleImpersonate` (:668-684) calls
+`IssueAccessToken` with no `Audience`. Master-admin-gated.
+**Mechanism:** RPs that opt into `aud` verification reject it (no `aud`); RPs that
+skip `aud` accept a global-role token. Acceptable for an admin console but
+inconsistent with per-app scoping.
+**Fix:** scope impersonation to a target app (require/stamp an `aud`), or document
+the exception.
+**Breaking:** depends (if a target app is required).
+
+### L3 — App-local user creation TOCTOU (store enforces no username uniqueness) — LOW
+**Where:** `internal/handler/app_selfservice.go` (:204-225); store `CreateUser` +
+`SetIdentityMapping` impose no uniqueness on `applocal:{appID}`+username.
+**Mechanism:** the existence check and the create are not atomic; two concurrent
+`POST /api/app/users` with the same username both pass, create two GUIDs, and the
+second `SetIdentityMapping` overwrites the first — orphaning a fully-provisioned user
+and making login nondeterministic. Not a privilege escalation.
+**Fix:** make check-then-create atomic in the store (or a per-app lock); enforce
+mapping uniqueness on write.
+**Breaking:** no.
+
+### L4 — `rotate-secret` does not revoke outstanding app-management tokens — LOW
+**Where:** `internal/handler/admin_apps.go` `handleRotateAppSecret` (:209-232) only
+rewrites `SecretHash`.
+**Mechanism:** existing app-management JWTs remain valid until `AccessTTL` expiry
+(self-contained, unrevocable; `authenticateApp` re-checks only `Disabled`, not a
+secret version). Rotating a leaked secret does not actually cut off active sessions —
+only *disabling* the app does.
+**Fix:** stamp a per-app secret version / `not-before` into the management token and
+check it on use, or document disable (not rotate) as the kill switch.
+**Breaking:** no.
+
+### L5 — App-id enumeration via bcrypt timing oracle — LOW
+**Where:** `internal/handler/app_selfservice.go` (:34-37, :66-67): bcrypt
+`CheckPassword` runs only when `GetApp` succeeds.
+**Mechanism:** a valid `app_id` with a wrong secret is measurably slower than an
+unknown `app_id`, letting an attacker enumerate registered app_ids (which are not
+themselves secrets, so impact is low).
+**Fix:** run a dummy bcrypt compare on the not-found branch, or accept it.
+**Breaking:** no.
+
+### I3 — Group-derived roles are inherently stale on refresh — INFO
+**Where:** both refresh paths; `user.Groups` is refreshed only by `syncUserFromLDAP`
+on interactive LDAP/Kerberos login.
+**Mechanism:** neither refresh path re-reads the directory, so AD group changes
+aren't reflected in per-app group-assignment roles until the user's next interactive
+login. Inherent to the persisted-`Groups` design; amplified by H5/M13. Operator
+note rather than a code bug — short access-token TTLs bound the staleness window.
+
+### Verified SAFE in Pass 2 (tried to break, survived)
+- **App scope/provenance:** every `/api/app/*` handler derives `app_id` from the
+  credential (`appIDFromContext`), never from a body/path field; no cross-app IDOR
+  (delete/password/list enforce `OwnerAppID==appID`). Per-app authz is keyed by
+  `app.AppID` — no cross-app bleed.
+- **Secret handling:** `appView` never emits `SecretHash`; the secret is shown once
+  on create/rotate only.
+- **Audience consistency:** `aud` is set on every *primary* issuance path (direct /
+  hosted / Kerberos / SSO / OIDC authcode/password), always as an array; the SDKs
+  handle string-or-array `aud`.
+- **Cross-app refresh via `client_id` injection:** not possible — both refresh
+  handlers derive app/audience from the **stored** refresh row, never a request
+  `client_id`.
+- **OIDC authcode binding:** resolves the app from the code, binds + re-checks
+  `redirect_uri`, enforces PKCE when set.
+- **`resolveApp` transient-default:** synthesized only for the default app id, never
+  for a named/disabled app.
+- **Local users can't set their own `Groups`:** `Groups` is written only from LDAP
+  results, never via admin or self-service create.
+- **App-local fencing:** app-local users shadow correctly, are exempt from
+  `require_assignment` only for their owner app, and are excluded from cross-app SSO
+  cookies; a wrong app-local password does not fall through to directory auth.
+- **Store parity:** `App`/`AppAuthz` CRUD behaves identically across Bolt/Postgres
+  (including the buggy `DeleteApp` cascade — same on both); migration round-trips
+  `apps`+`app_authz` both directions with row-count checks.
+- **Admin UI Apps page:** Preact/htm auto-escapes all interpolated app fields, the
+  shown secret, and the authz editor; no `innerHTML`/`dangerouslySetInnerHTML` sink;
+  actions hit the correct credential-scoped endpoints.
+
+### Recommended fix order (all OPEN)
+1. **H5, H6, M10** — the per-app authz / refresh correctness cluster (one coherent
+   change to `handleRefresh` + `resolveTokenRoles`). Highest impact, mostly
+   non-breaking.
+2. **H7** — add the `typ` gate in `validateAccessToken` (trivial, non-breaking).
+3. **H8, M14, L3** — app-local user lifecycle / mapping hygiene in the store.
+4. **M11** — per-app secret for confidential grants (breaking; bundle with the
+   `2.0.0` notes).
+5. **M12, M13, M15, M16** — provisioning + sync + rate-limit hardening.
+6. **L1, L2, L4, L5, I3** — lower-impact hardening + operator docs.
+
+---
+
+## Remediation Log — Audit Pass 2 (2026-05-31, Claude Opus 4.8)
+
+All 16 code findings (H5–H8, M10–M16, L1–L5) are **FIXED** on branch `v2`, one
+commit per finding, each with a regression test in
+`internal/handler/pass2_test.go` (plus store-layer coverage for H8). I3 is
+**WONTFIX** (design note, below). `go build`, `go vet`, and the full test suite are
+green.
+
+| ID | Files | Approach |
+|----|-------|----------|
+| H5 | `internal/handler/auth.go` | `handleRefresh` re-resolves the app from the stored refresh row and uses `resolveTokenRoles` (per-app roles + `require_assignment`) instead of global roles; rejects a disabled/deleted app. |
+| H6 | `internal/handler/apps.go` | `resolveTokenRoles` evaluates `require_assignment` **before** the v1 global-roles fallback, so an app with the flag on but no assignments fails closed. |
+| H7 | `internal/handler/auth.go` | `validateAccessToken` rejects `typ=="app-mgmt"`, so management tokens can't act as user tokens at userinfo/introspection/reset-password. |
+| H8 | `internal/store/{bolt,postgres}.go` | `DeleteApp` cascades app-local users + their `applocal:` identity mappings inside one transaction. |
+| M10 | `internal/handler/oidc.go` (+ H5 for auth.go) | OIDC refresh resolves the app and returns `invalid_grant` on a disabled/deleted app instead of nil-dereferencing. |
+| M11 | `internal/handler/oidc.go` | New `authenticateConfidentialClient`: named apps authenticate against their own `SecretHash` for `client_credentials`/`password`; the secret-less default client falls back to `AUTH_CLIENT_SECRET`. |
+| M12 | `internal/handler/{auth,apps}.go` | Kerberos auto-provision (`matchAutoProvisionUser`) skips `OwnerAppID!=""` users. |
+| M13 | `internal/handler/auth.go` | `syncUserFromLDAP` always reconciles `user.Groups` to the bind result, clearing stale groups when the user is in none. |
+| M14 | `internal/handler/app_selfservice.go` | `handleDeleteLocalUser` deletes the user's identity mappings + stale per-app assignment. |
+| M15 | `internal/handler/app_selfservice.go` | App-local create + password reset call `auth.ValidatePassword(…, h.passwordPolicy())`. |
+| M16 | `internal/handler/app_selfservice.go` | `/api/app/token` and Basic-auth `/api/app/*` go through the per-IP login limiter; Bearer mgmt-token calls are exempt. |
+| L1 | `internal/handler/auth.go` | `/login/sso` resolves the app up front and validates `redirect_uri` via `appAllowsRedirect`. |
+| L2 | `internal/handler/auth.go` | `handleImpersonate` scopes the token to an app (optional `app_id`, default app otherwise), stamping `aud` + per-app roles. |
+| L4 | `internal/store/types.go`, `internal/handler/{admin_apps,app_selfservice}.go` | `App.SecretRotatedAt` stamped on rotate; `authenticateApp` rejects mgmt tokens with `iat` before it. |
+| L5 | `internal/handler/app_selfservice.go` | App credential check always runs one bcrypt compare (dummy hash when unknown/secret-less). |
+
+### Operator notes (behavior changes shipped in this pass — for the `2.0.0` release)
+- **`require_assignment` now denies by default (H6).** An app with
+  `require_assignment: true` and no assignments will reject all directory users until
+  you assign them. (Previously it silently admitted everyone with their global roles.)
+- **Refreshed tokens carry per-app roles, not global roles (H5).** A user's effective
+  app roles are re-evaluated on every refresh, including `require_assignment`
+  de-assignment.
+- **Confidential grants need the per-app secret (M11).** `client_credentials` and
+  `password` for a **named** app must present that app's `app_secret`; only the
+  secret-less default client uses `AUTH_CLIENT_SECRET`.
+- **App-local passwords must meet the password policy (M15).**
+- **Disabling or deleting an app now stops token refresh (H5/M10);** deleting an app
+  also removes its app-local users (H8); rotating an app secret revokes its
+  outstanding management tokens (L4).
+
+### I3 — group-derived roles are stale on refresh — INFO — WONTFIX (by design)
+Neither refresh path re-reads the directory, so an AD group change isn't reflected in
+group-derived per-app roles until the user's next interactive login. This is inherent
+to the persisted-`Groups` design (M3): it lets every flow resolve group roles without
+a live LDAP round-trip on each token. The staleness window is bounded by the
+access-token TTL, and **M13** now guarantees the next interactive login reconciles the
+set (including clearing all groups). Operators who need immediate revocation should use
+the access-revocation kill switch (`IsUserAccessRevoked`, honored on refresh per M3) or
+a short access-token TTL. Revisit if a directory-change webhook/poll is added.
 </content>

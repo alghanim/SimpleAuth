@@ -80,6 +80,9 @@ func runServer() (exit bool) {
 		}
 	}
 
+	// v2: ensure a default app exists, wrapping the existing single-client config.
+	ensureDefaultApp(s, cfg)
+
 	// Initialize JWT manager (auto-generates RSA keys on first run)
 	jwtMgr, err := auth.NewJWTManager(cfg.DataDir, cfg.JWTIssuer)
 	if err != nil {
@@ -190,4 +193,33 @@ func generateAdminKey() string {
 	b := make([]byte, 16)
 	rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// ensureDefaultApp creates a default app on first v2 start, wrapping the
+// existing single-client config (client id, redirect URIs, optional secret) so
+// v1 deployments keep working unchanged. No-op if any app already exists.
+func ensureDefaultApp(s store.Store, cfg *config.Config) {
+	apps, err := s.ListApps()
+	if err != nil || len(apps) > 0 {
+		return
+	}
+	appID := cfg.ClientID
+	if appID == "" {
+		appID = "simpleauth"
+	}
+	a := &store.App{
+		AppID:        appID,
+		Name:         "Default",
+		Audience:     appID,
+		RedirectURIs: cfg.RedirectURIs,
+		CreatedAt:    time.Now().UTC(),
+	}
+	if cfg.ClientSecret != "" {
+		if hash, herr := auth.HashPassword(cfg.ClientSecret); herr == nil {
+			a.SecretHash = hash
+		}
+	}
+	if err := s.CreateApp(a); err == nil {
+		log.Printf("Created default app %q from existing config (v2)", appID)
+	}
 }

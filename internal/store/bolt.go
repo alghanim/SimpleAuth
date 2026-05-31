@@ -28,6 +28,8 @@ var (
 	bucketRevokedTokens    = []byte("revoked_tokens")
 	bucketRevokedUsers     = []byte("revoked_users")
 	bucketSessions         = []byte("sessions")
+	bucketApps             = []byte("apps")
+	bucketAppAuthz         = []byte("app_authz")
 )
 
 // BoltStore implements the Store interface using BoltDB (bbolt).
@@ -58,6 +60,136 @@ func (s *BoltStore) Close() error {
 	return s.db.Close()
 }
 
+// --- Apps (v2) ---
+
+func (s *BoltStore) CreateApp(a *App) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketApps)
+		if b.Get([]byte(a.AppID)) != nil {
+			return ErrAppExists
+		}
+		data, err := json.Marshal(a)
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(a.AppID), data)
+	})
+}
+
+func (s *BoltStore) GetApp(appID string) (*App, error) {
+	var a App
+	err := s.db.View(func(tx *bolt.Tx) error {
+		data := tx.Bucket(bucketApps).Get([]byte(appID))
+		if data == nil {
+			return fmt.Errorf("app not found")
+		}
+		return json.Unmarshal(data, &a)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
+func (s *BoltStore) ListApps() ([]*App, error) {
+	var apps []*App
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketApps).ForEach(func(k, v []byte) error {
+			var a App
+			if err := json.Unmarshal(v, &a); err != nil {
+				return err
+			}
+			apps = append(apps, &a)
+			return nil
+		})
+	})
+	return apps, err
+}
+
+func (s *BoltStore) UpdateApp(a *App) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketApps)
+		if b.Get([]byte(a.AppID)) == nil {
+			return fmt.Errorf("app not found")
+		}
+		data, err := json.Marshal(a)
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(a.AppID), data)
+	})
+}
+
+func (s *BoltStore) DeleteApp(appID string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		// Cascade: delete the app's app-local users and every identity mapping they
+		// own, so re-registering the same app_id cannot resurrect ghost accounts
+		// (and their password hashes) under a new owner (H8). Collect first —
+		// BoltDB forbids mutating a bucket mid-ForEach.
+		var localGUIDs []string
+		if err := tx.Bucket(bucketUsers).ForEach(func(k, v []byte) error {
+			var u User
+			if err := json.Unmarshal(v, &u); err != nil {
+				return nil
+			}
+			if u.OwnerAppID == appID {
+				localGUIDs = append(localGUIDs, u.GUID)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		for _, guid := range localGUIDs {
+			if err := tx.Bucket(bucketUsers).Delete([]byte(guid)); err != nil {
+				return err
+			}
+			if data := tx.Bucket(bucketIdxMappingsByGUID).Get([]byte(guid)); data != nil {
+				var mappings []IdentityMapping
+				if json.Unmarshal(data, &mappings) == nil {
+					for _, m := range mappings {
+						if err := tx.Bucket(bucketIdentityMappings).Delete(mappingKey(m.Provider, m.ExternalID)); err != nil {
+							return err
+						}
+					}
+				}
+				if err := tx.Bucket(bucketIdxMappingsByGUID).Delete([]byte(guid)); err != nil {
+					return err
+				}
+			}
+		}
+		if err := tx.Bucket(bucketApps).Delete([]byte(appID)); err != nil {
+			return err
+		}
+		// Cascade: drop the app's authorization data too.
+		return tx.Bucket(bucketAppAuthz).Delete([]byte(appID))
+	})
+}
+
+func (s *BoltStore) GetAppAuthz(appID string) (*AppAuthz, error) {
+	authz := &AppAuthz{AppID: appID}
+	err := s.db.View(func(tx *bolt.Tx) error {
+		data := tx.Bucket(bucketAppAuthz).Get([]byte(appID))
+		if data == nil {
+			return nil // none stored — return zero-value
+		}
+		return json.Unmarshal(data, authz)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return authz, nil
+}
+
+func (s *BoltStore) SaveAppAuthz(authz *AppAuthz) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		data, err := json.Marshal(authz)
+		if err != nil {
+			return err
+		}
+		return tx.Bucket(bucketAppAuthz).Put([]byte(authz.AppID), data)
+	})
+}
+
 func (s *BoltStore) init() error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		for _, b := range [][]byte{
@@ -70,6 +202,8 @@ func (s *BoltStore) init() error {
 			bucketRevokedTokens,
 			bucketRevokedUsers,
 			bucketSessions,
+			bucketApps,
+			bucketAppAuthz,
 		} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err

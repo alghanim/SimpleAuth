@@ -2,8 +2,9 @@
 
 The :class:`SimpleAuth` client handles credential exchange (login, refresh,
 client-credentials), the OIDC userinfo endpoint, admin role/permission
-management, and — most importantly — **offline** RS256 JWT verification against
-the server's JWKS.
+management, v2 **per-app self-management** (``/api/app/*``, authenticated with
+the app credential), and — most importantly — **offline** RS256 JWT
+verification against the server's JWKS.
 
 No JWT library is used. Tokens are parsed manually (base64url-decode the header
 and payload) and RS256 signatures are verified directly with ``cryptography``.
@@ -37,22 +38,25 @@ from cryptography.hazmat.primitives.asymmetric import padding
 
 from .errors import (
     AdminError,
+    AppError,
     AuthenticationError,
     SimpleAuthError,
     TokenVerificationError,
 )
 from .jwks import JWKSCache
-from .models import TokenResponse, User, UserInfo
+from .models import AppAuthz, TokenResponse, User, UserInfo
 
 __all__ = [
     "SimpleAuth",
     "TokenResponse",
     "User",
     "UserInfo",
+    "AppAuthz",
     "SimpleAuthError",
     "AuthenticationError",
     "TokenVerificationError",
     "AdminError",
+    "AppError",
 ]
 
 #: Default issuer the SimpleAuth server uses for direct login/refresh tokens.
@@ -79,6 +83,14 @@ class SimpleAuth:
         client_id: OAuth2 client id, used by the client-credentials grant.
         client_secret: OAuth2 client secret, used by the client-credentials
             grant.
+        app_id: v2 app id (an OAuth client id). Required only for the app
+            self-management helpers (``app_bootstrap``, ``get_app_authz``, …),
+            which authenticate to ``/api/app/*`` with HTTP Basic
+            ``app_id:app_secret``. Also commonly used as the ``audience`` so
+            ``verify`` rejects other apps' tokens.
+        app_secret: v2 app secret, paired with ``app_id`` for the app
+            self-management helpers. Never sent except as the Basic-auth
+            password to this server.
         realm: The server realm/issuer name, used to build the OIDC token
             endpoint for the client-credentials grant. Defaults to
             ``"simpleauth"``.
@@ -99,6 +111,8 @@ class SimpleAuth:
         verify_ssl: bool = True,
         client_id: Optional[str] = None,
         client_secret: Optional[str] = None,
+        app_id: Optional[str] = None,
+        app_secret: Optional[str] = None,
         realm: str = DEFAULT_REALM,
         expected_issuer: Optional[str] = None,
         audience: Optional[str] = None,
@@ -114,6 +128,8 @@ class SimpleAuth:
         self.verify_ssl = verify_ssl
         self.client_id = client_id
         self.client_secret = client_secret
+        self.app_id = app_id
+        self.app_secret = app_secret
         self.realm = realm
         self.expected_issuer = expected_issuer
         self.audience = audience
@@ -449,6 +465,225 @@ class SimpleAuth:
         """
         self._admin_request(
             "PUT", f"/api/admin/users/{guid}/permissions", list(permissions)
+        )
+
+    # ------------------------------------------------------------------
+    # App self-management (v2: /api/app/*, HTTP Basic app_id:app_secret)
+    # ------------------------------------------------------------------
+
+    def _app_request(
+        self,
+        method: str,
+        path: str,
+        payload: Optional[Any] = None,
+    ) -> Optional[Any]:
+        """Issue a ``/api/app/*`` request authenticated as the app.
+
+        Uses HTTP Basic ``app_id:app_secret`` (the server also derives the
+        ``app_id`` from the credential, so it is never placed in the path).
+
+        Raises:
+            AppError: If ``app_id`` / ``app_secret`` are missing, the request
+                fails, or the server returns a non-2xx status.
+        """
+        if not self.app_id or not self.app_secret:
+            raise AppError(
+                "app_id and app_secret are required for app self-management operations"
+            )
+
+        try:
+            resp = self._session.request(
+                method,
+                f"{self.base_url}{path}",
+                json=payload if payload is not None else None,
+                auth=(self.app_id, self.app_secret),
+                verify=self.verify_ssl,
+                timeout=self.timeout,
+            )
+        except requests.RequestException as exc:
+            raise AppError(f"app request to {path} failed: {exc}") from exc
+
+        if not (200 <= resp.status_code < 300):
+            message, detail, code = self._extract_error(resp)
+            raise AppError(
+                message, status_code=resp.status_code, detail=detail, code=code
+            )
+
+        if not resp.content:
+            return None
+        try:
+            return resp.json()
+        except ValueError:
+            return None
+
+    def app_bootstrap(
+        self,
+        *,
+        roles: Optional[List[str]] = None,
+        permissions: Optional[List[str]] = None,
+        role_permissions: Optional[Mapping[str, List[str]]] = None,
+        assignments: Optional[List[Mapping[str, Any]]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Declare this app's authorization as code (idempotent).
+
+        Sends ``POST {base}/api/app/bootstrap`` with the app credential. Safe to
+        call on every deploy: it upserts the app's roles, permissions, the
+        role→permission map, and the user/group assignments.
+
+        Args:
+            roles: Roles to define inside this app.
+            permissions: Permissions to define inside this app.
+            role_permissions: Map of role -> the permissions it grants.
+            assignments: List of assignment entries, each either
+                ``{"user": "<ref>", "roles": [...]}`` (ref = GUID,
+                sAMAccountName, or username) or
+                ``{"group": "<sAMAccountName>", "roles": [...]}``.
+
+        Raises:
+            AppError: If app credentials are missing or the request fails.
+        """
+        body: Dict[str, Any] = {
+            "roles": list(roles or []),
+            "permissions": list(permissions or []),
+            "role_permissions": {
+                k: list(v) for k, v in (role_permissions or {}).items()
+            },
+            "assignments": [dict(a) for a in (assignments or [])],
+        }
+        result = self._app_request("POST", "/api/app/bootstrap", body)
+        return result if isinstance(result, dict) else None
+
+    def get_app_authz(self) -> AppAuthz:
+        """Read this app's per-app authorization.
+
+        Sends ``GET {base}/api/app/authz`` and returns an
+        :class:`~simpleauth.models.AppAuthz` (roles, permissions,
+        role_permissions, and user/group assignments).
+
+        Raises:
+            AppError: If app credentials are missing or the request fails.
+        """
+        result = self._app_request("GET", "/api/app/authz")
+        return AppAuthz.from_dict(result if isinstance(result, Mapping) else {})
+
+    def set_app_authz(
+        self,
+        authz: Optional[AppAuthz] = None,
+        *,
+        roles: Optional[List[str]] = None,
+        permissions: Optional[List[str]] = None,
+        role_permissions: Optional[Mapping[str, List[str]]] = None,
+        user_assignments: Optional[Mapping[str, List[str]]] = None,
+        group_assignments: Optional[Mapping[str, List[str]]] = None,
+    ) -> AppAuthz:
+        """Replace this app's per-app authorization.
+
+        Sends ``PUT {base}/api/app/authz``. Pass an
+        :class:`~simpleauth.models.AppAuthz` (e.g. one returned by
+        :meth:`get_app_authz`) as the positional argument, or supply the
+        individual fields as keywords. Any ``app_id`` is ignored — the server
+        derives it from the credential.
+
+        Returns the app's authorization as the server reports it after the
+        update.
+
+        Raises:
+            AppError: If app credentials are missing or the request fails.
+        """
+        if authz is not None:
+            body = authz.to_dict()
+        else:
+            body = AppAuthz(
+                roles=list(roles or []),
+                permissions=list(permissions or []),
+                role_permissions={k: list(v) for k, v in (role_permissions or {}).items()},
+                user_assignments={k: list(v) for k, v in (user_assignments or {}).items()},
+                group_assignments={k: list(v) for k, v in (group_assignments or {}).items()},
+            ).to_dict()
+
+        result = self._app_request("PUT", "/api/app/authz", body)
+        # The endpoint may echo the stored authz; fall back to a read otherwise.
+        if isinstance(result, Mapping) and result:
+            return AppAuthz.from_dict(result)
+        return self.get_app_authz()
+
+    def app_settings(self) -> Dict[str, Any]:
+        """Return this app's settings (read-only, no secret).
+
+        Sends ``GET {base}/api/app/settings``. Useful to learn whether this app
+        has ``require_assignment`` or ``allow_local_users`` enabled.
+
+        Raises:
+            AppError: If app credentials are missing or the request fails.
+        """
+        result = self._app_request("GET", "/api/app/settings")
+        return result if isinstance(result, dict) else {}
+
+    def create_local_user(
+        self,
+        username: str,
+        password: str,
+        *,
+        display_name: Optional[str] = None,
+        email: Optional[str] = None,
+        roles: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Provision an app-local user owned by this app.
+
+        Sends ``POST {base}/api/app/users``. Requires the app's
+        ``allow_local_users`` flag. The created user authenticates locally, only
+        ever receives ``aud = <this app>`` tokens, and is unique **within this
+        app** (it shadows a directory user of the same name at this app).
+
+        Returns the created user record (which includes the assigned ``guid``).
+
+        Raises:
+            AppError: If app credentials are missing, local users are not
+                allowed for this app, or the request fails.
+        """
+        body: Dict[str, Any] = {"username": username, "password": password}
+        if display_name is not None:
+            body["display_name"] = display_name
+        if email is not None:
+            body["email"] = email
+        if roles is not None:
+            body["roles"] = list(roles)
+        result = self._app_request("POST", "/api/app/users", body)
+        return result if isinstance(result, dict) else {}
+
+    def list_local_users(self) -> List[Dict[str, Any]]:
+        """List this app's app-local users.
+
+        Sends ``GET {base}/api/app/users``.
+
+        Raises:
+            AppError: If app credentials are missing or the request fails.
+        """
+        result = self._app_request("GET", "/api/app/users")
+        return list(result or [])
+
+    def delete_local_user(self, guid: str) -> None:
+        """Delete an app-local user owned by this app.
+
+        Sends ``DELETE {base}/api/app/users/{guid}``. The user must be owned by
+        this app.
+
+        Raises:
+            AppError: If app credentials are missing or the request fails.
+        """
+        self._app_request("DELETE", f"/api/app/users/{guid}")
+
+    def set_local_user_password(self, guid: str, password: str) -> None:
+        """Reset an app-local user's password.
+
+        Sends ``PUT {base}/api/app/users/{guid}/password`` with ``{password}``.
+        The user must be owned by this app.
+
+        Raises:
+            AppError: If app credentials are missing or the request fails.
+        """
+        self._app_request(
+            "PUT", f"/api/app/users/{guid}/password", {"password": password}
         )
 
     # ------------------------------------------------------------------

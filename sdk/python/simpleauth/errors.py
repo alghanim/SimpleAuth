@@ -55,9 +55,20 @@ class AdminError(SimpleAuthError):
     """Raised when an admin API call fails or no admin key was configured."""
 
 
+class AppError(SimpleAuthError):
+    """Raised when an app self-management API call fails.
+
+    Used by the ``/api/app/*`` helpers (bootstrap, authz, settings, app-local
+    users). Also raised when ``app_id`` / ``app_secret`` were not configured.
+    Like the base error, it carries the HTTP ``status_code`` and server-provided
+    ``detail`` / ``code`` when available.
+    """
+
+
 __all__ = [
     "SimpleAuthError",
     "AuthenticationError",
     "TokenVerificationError",
     "AdminError",
+    "AppError",
 ]

@@ -112,6 +112,72 @@ auth.set_user_permissions(guid="user-guid", permissions=["read:posts", "write:po
 
 > **Note:** Roles and permissions must be defined in SimpleAuth before they can be assigned to users. Use the admin API to define roles (`PUT /api/admin/role-permissions`) and permissions (`PUT /api/admin/permissions`) first, or define them in the Admin UI under Roles & Permissions.
 
+## v2: Per-App Management
+
+In SimpleAuth v2 an **app** is an OAuth client (`app_id` + `app_secret`) that self-manages its **own** authorization — its roles, permissions, and which directory users / AD groups are assigned to it. Tokens are scoped to the app via the `aud` claim, so **a token minted for app A is rejected by app B**.
+
+Construct the client with `app_id` / `app_secret` (the app credential) and `audience`. The app helpers authenticate to `/api/app/*` with HTTP Basic `app_id:app_secret`; the `app_id` is derived from the credential, so an app can only ever touch its own scope. No master admin key is involved.
+
+> **Set `audience` to your app.** `verify()` only rejects foreign-app tokens when `audience` is configured — a missing `aud` check would let another app's token through.
+
+```python
+from simpleauth import SimpleAuth
+
+auth = SimpleAuth(
+    url="https://auth.example.com/sauth",
+    app_id="billing",
+    app_secret="...",         # from your secret store
+    audience="billing",       # verify() rejects tokens whose aud != "billing"
+)
+```
+
+### Bootstrap (authz-as-code)
+
+`app_bootstrap` is idempotent — call it on every deploy to declare the app's roles, role→permission map, and assignments:
+
+```python
+auth.app_bootstrap(
+    roles=["admin", "viewer"],
+    role_permissions={"admin": ["invoice:write"], "viewer": ["invoice:read"]},
+    assignments=[
+        {"group": "Finance", "roles": ["admin"]},   # group = sAMAccountName by default
+        {"user": "jsmith", "roles": ["viewer"]},     # user = GUID / sAMAccountName / username
+    ],
+)
+```
+
+### Read / replace authorization
+
+```python
+authz = auth.get_app_authz()       # -> AppAuthz(roles, permissions, role_permissions,
+                                   #             user_assignments, group_assignments)
+
+authz.user_assignments["alice"] = ["viewer"]
+auth.set_app_authz(authz)          # PUT (full replace); app_id in the body is ignored
+
+settings = auth.app_settings()     # read-only view (no secret), e.g. require_assignment
+```
+
+### App-local users (requires `allow_local_users`)
+
+For users that aren't in your directory (e.g. a customer portal). They authenticate locally, only ever get `aud=<this app>` tokens, are **not** SSO-shared, and are exempt from `require_assignment`:
+
+```python
+created = auth.create_local_user(
+    "customer1", "s3cr3t!",
+    display_name="Customer One",
+    email="c1@example.com",
+    roles=["viewer"],
+)
+guid = created["guid"]
+
+auth.list_local_users()
+auth.set_local_user_password(guid, "new-s3cr3t!")
+auth.delete_local_user(guid)
+```
+
+All app helpers raise `AppError` (subclass of `SimpleAuthError`) if `app_id`/`app_secret` are missing or the request fails. See [`examples/python/app_integration.py`](../../examples/python/app_integration.py) for a full runnable example.
+
 ## Framework Middleware
 
 ### FastAPI

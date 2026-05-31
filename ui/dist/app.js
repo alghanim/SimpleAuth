@@ -45,6 +45,7 @@ const icons = {
   roles: html`<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>`,
   database: html`<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>`,
   settings: html`<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`,
+  apps: html`<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>`,
 };
 
 // === Toast ===
@@ -1943,6 +1944,224 @@ function DatabasePage() {
 }
 
 // === App Shell ===
+// === Apps (v2 per-app authorization) ===
+function AppsPage() {
+  const [apps, setApps] = useState([]);
+  const [toast, setToast] = useState(null);
+  const [showCreate, setShowCreate] = useState(false);
+  const [form, setForm] = useState({ app_id: '', name: '', audience: '', require_assignment: false, allow_local_users: false });
+  const [secretModal, setSecretModal] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(null);
+  const [authzApp, setAuthzApp] = useState(null);
+  const [authz, setAuthz] = useState(null);
+
+  const showToast = (message, type = 'success') => {
+    setToast({ message, type });
+    clearTimeout(toastTimeout);
+    toastTimeout = setTimeout(() => setToast(null), 3000);
+  };
+
+  const load = () => api('GET', '/api/admin/apps').then(d => setApps(d.apps || [])).catch(() => {});
+  useEffect(() => { load(); }, []);
+
+  const createApp = async () => {
+    try {
+      const res = await api('POST', '/api/admin/apps', form);
+      setShowCreate(false);
+      setForm({ app_id: '', name: '', audience: '', require_assignment: false, allow_local_users: false });
+      setSecretModal({ app_id: res.app_id, app_secret: res.app_secret });
+      load();
+    } catch (e) { showToast(e.message, 'error'); }
+  };
+
+  const rotate = async (id) => {
+    try { const res = await api('POST', `/api/admin/apps/${id}/rotate-secret`); setSecretModal({ app_id: res.app_id, app_secret: res.app_secret }); }
+    catch (e) { showToast(e.message, 'error'); }
+  };
+
+  const del = async (id) => {
+    try { await api('DELETE', `/api/admin/apps/${id}`); setConfirmDelete(null); load(); showToast('App deleted'); }
+    catch (e) { showToast(e.message, 'error'); }
+  };
+
+  const toggleFlag = async (app, key) => {
+    try { await api('PUT', `/api/admin/apps/${app.app_id}`, { [key]: !app[key] }); load(); }
+    catch (e) { showToast(e.message, 'error'); }
+  };
+
+  const openAuthz = async (id) => {
+    try { const a = await api('GET', `/api/admin/apps/${id}/authz`); setAuthz(a); setAuthzApp(id); }
+    catch (e) { showToast(e.message, 'error'); }
+  };
+
+  const saveAuthz = async (finalAuthz) => {
+    try { await api('PUT', `/api/admin/apps/${authzApp}/authz`, finalAuthz); setAuthzApp(null); showToast('Authorization saved'); }
+    catch (e) { showToast(e.message, 'error'); }
+  };
+
+  const copy = (text) => { if (navigator.clipboard) { navigator.clipboard.writeText(text); showToast('Copied'); } };
+
+  return html`
+    <div class="page-header">
+      <h2>Apps</h2>
+      <div class="page-header-actions">
+        <button class="btn btn-primary" onClick=${() => setShowCreate(true)}>${icons.plus} New App</button>
+      </div>
+    </div>
+    <p style="color:var(--text-muted);margin:0 0 var(--sp-4)">Per-app authorization — each app owns its roles, permissions, and allowed users. A token minted for one app is rejected by another.</p>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>App ID</th><th>Name</th><th>Audience</th><th>Require assignment</th><th>Local users</th><th style="text-align:right">Actions</th></tr></thead>
+        <tbody>
+          ${apps.length === 0
+            ? html`<tr><td colspan="6"><div class="empty-state"><p>No apps yet — register one to start scoping authorization per application.</p></div></td></tr>`
+            : apps.map(app => html`
+              <tr>
+                <td><code>${app.app_id}</code>${app.disabled ? html` <span class="badge badge-warning">disabled</span>` : ''}</td>
+                <td>${app.name || '—'}</td>
+                <td><code>${app.audience}</code></td>
+                <td><input type="checkbox" checked=${app.require_assignment} onChange=${() => toggleFlag(app, 'require_assignment')} /></td>
+                <td><input type="checkbox" checked=${app.allow_local_users} onChange=${() => toggleFlag(app, 'allow_local_users')} /></td>
+                <td style="text-align:right;white-space:nowrap">
+                  <button class="btn btn-sm btn-secondary" onClick=${() => openAuthz(app.app_id)}>Authz</button>
+                  <button class="btn btn-sm btn-secondary" onClick=${() => rotate(app.app_id)}>Rotate secret</button>
+                  <button class="btn btn-sm btn-danger" onClick=${() => setConfirmDelete(app.app_id)}>Delete</button>
+                </td>
+              </tr>
+            `)}
+        </tbody>
+      </table>
+    </div>
+
+    ${showCreate && html`
+      <${Modal} title="Register App" onClose=${() => setShowCreate(false)}>
+        <div class="form-group"><label>App ID</label><input class="form-input" value=${form.app_id} onInput=${e => setForm({ ...form, app_id: e.target.value })} placeholder="billing (lowercase a-z 0-9 - _; optional, derived from name)" /></div>
+        <div class="form-group"><label>Name</label><input class="form-input" value=${form.name} onInput=${e => setForm({ ...form, name: e.target.value })} placeholder="Billing" /></div>
+        <div class="form-group"><label>Audience</label><input class="form-input" value=${form.audience} onInput=${e => setForm({ ...form, audience: e.target.value })} placeholder="(optional — defaults to the app id)" /></div>
+        <div class="form-group"><label><input type="checkbox" checked=${form.require_assignment} onChange=${e => setForm({ ...form, require_assignment: e.target.checked })} /> Require explicit assignment (deny unassigned directory users)</label></div>
+        <div class="form-group"><label><input type="checkbox" checked=${form.allow_local_users} onChange=${e => setForm({ ...form, allow_local_users: e.target.checked })} /> Allow app-local users (identities not in your directory)</label></div>
+        <div style="display:flex;gap:var(--sp-2);justify-content:flex-end;margin-top:var(--sp-4)">
+          <button class="btn btn-secondary" onClick=${() => setShowCreate(false)}>Cancel</button>
+          <button class="btn btn-primary" onClick=${createApp}>Create</button>
+        </div>
+      </${Modal}>
+    `}
+
+    ${secretModal && html`
+      <${Modal} title="App secret — shown once" onClose=${() => setSecretModal(null)}>
+        <p style="color:var(--text-muted)">Copy this now. It's hashed at rest and cannot be shown again — rotate to issue a new one.</p>
+        <div class="form-group"><label>app_id</label><input class="form-input" readonly value=${secretModal.app_id} /></div>
+        <div class="form-group"><label>app_secret</label>
+          <div style="display:flex;gap:var(--sp-2)">
+            <input class="form-input" readonly value=${secretModal.app_secret} style="font-family:monospace" />
+            <button class="btn btn-sm btn-secondary" onClick=${() => copy(secretModal.app_secret)}>${icons.copy} Copy</button>
+          </div>
+        </div>
+        <div style="display:flex;justify-content:flex-end;margin-top:var(--sp-4)"><button class="btn btn-primary" onClick=${() => setSecretModal(null)}>Done</button></div>
+      </${Modal}>
+    `}
+
+    ${confirmDelete && html`
+      <${Modal} title="Delete app?" onClose=${() => setConfirmDelete(null)}>
+        <p>Delete <code>${confirmDelete}</code> and all of its per-app roles and assignments? This cannot be undone.</p>
+        <div style="display:flex;gap:var(--sp-2);justify-content:flex-end;margin-top:var(--sp-4)">
+          <button class="btn btn-secondary" onClick=${() => setConfirmDelete(null)}>Cancel</button>
+          <button class="btn btn-danger" onClick=${() => del(confirmDelete)}>Delete</button>
+        </div>
+      </${Modal}>
+    `}
+
+    ${authzApp && authz && html`<${AppAuthzEditor} appId=${authzApp} initial=${authz} onSave=${saveAuthz} onClose=${() => setAuthzApp(null)} />`}
+
+    ${toast && html`<${Toast} ...${toast} />`}
+  `;
+}
+
+function AppAuthzEditor({ appId, initial, onSave, onClose }) {
+  const [roles, setRoles] = useState(initial.roles || []);
+  const [userA, setUserA] = useState(initial.user_assignments || {});
+  const [groupA, setGroupA] = useState(initial.group_assignments || {});
+  const [rpText, setRpText] = useState(JSON.stringify(initial.role_permissions || {}, null, 2));
+  const [rpError, setRpError] = useState('');
+  const [newRole, setNewRole] = useState('');
+  const [asgn, setAsgn] = useState({ type: 'user', id: '', roles: '' });
+
+  const addRole = () => { const r = newRole.trim(); if (!r || roles.includes(r)) return; setRoles([...roles, r]); setNewRole(''); };
+  const removeRole = (r) => setRoles(roles.filter(x => x !== r));
+
+  const assignments = [
+    ...Object.entries(userA).map(([id, rs]) => ({ type: 'user', id, roles: rs || [] })),
+    ...Object.entries(groupA).map(([id, rs]) => ({ type: 'group', id, roles: rs || [] })),
+  ];
+  const addAssignment = () => {
+    const id = asgn.id.trim(); if (!id) return;
+    const rs = asgn.roles.split(',').map(s => s.trim()).filter(Boolean);
+    if (asgn.type === 'user') setUserA({ ...userA, [id]: rs }); else setGroupA({ ...groupA, [id]: rs });
+    setAsgn({ type: 'user', id: '', roles: '' });
+  };
+  const removeAssignment = (type, id) => {
+    if (type === 'user') { const c = { ...userA }; delete c[id]; setUserA(c); }
+    else { const c = { ...groupA }; delete c[id]; setGroupA(c); }
+  };
+
+  const save = () => {
+    let rp = {};
+    try { rp = JSON.parse(rpText || '{}'); } catch (e) { setRpError('Role → permissions is not valid JSON'); return; }
+    onSave({ app_id: appId, roles, role_permissions: rp, user_assignments: userA, group_assignments: groupA });
+  };
+
+  return html`
+    <${Modal} title=${'Authorization — ' + appId} onClose=${onClose}>
+      <div class="form-group">
+        <label>Roles</label>
+        <div style="display:flex;flex-wrap:wrap;gap:var(--sp-2);margin-bottom:var(--sp-2)">
+          ${roles.length === 0 ? html`<span style="color:var(--text-muted)">No roles defined</span>` : roles.map(r => html`<span class="badge">${r} <a href="#" style="text-decoration:none" onClick=${(e) => { e.preventDefault(); removeRole(r); }}>×</a></span>`)}
+        </div>
+        <div style="display:flex;gap:var(--sp-2)">
+          <input class="form-input" value=${newRole} onInput=${e => setNewRole(e.target.value)} placeholder="role name" onKeyDown=${e => e.key === 'Enter' && (e.preventDefault(), addRole())} />
+          <button class="btn btn-sm btn-secondary" onClick=${addRole}>Add</button>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>Assignments <span style="color:var(--text-muted);font-weight:normal">(user / AD-group → roles)</span></label>
+        <div class="table-wrap">
+          <table>
+            <tbody>
+              ${assignments.length === 0 ? html`<tr><td colspan="4" style="color:var(--text-muted)">No assignments</td></tr>` : assignments.map(a => html`
+                <tr>
+                  <td><span class="badge">${a.type}</span></td>
+                  <td><code>${a.id}</code></td>
+                  <td>${a.roles.join(', ') || '—'}</td>
+                  <td style="text-align:right"><button class="btn btn-sm btn-danger" onClick=${() => removeAssignment(a.type, a.id)}>×</button></td>
+                </tr>
+              `)}
+            </tbody>
+          </table>
+        </div>
+        <div style="display:flex;gap:var(--sp-2);margin-top:var(--sp-2);align-items:center;flex-wrap:wrap">
+          <select class="form-input" style="max-width:110px" value=${asgn.type} onChange=${e => setAsgn({ ...asgn, type: e.target.value })}><option value="user">user</option><option value="group">group</option></select>
+          <input class="form-input" style="flex:1;min-width:160px" value=${asgn.id} onInput=${e => setAsgn({ ...asgn, id: e.target.value })} placeholder=${asgn.type === 'user' ? 'username / sAMAccountName' : 'group sAMAccountName'} />
+          <input class="form-input" style="flex:1;min-width:140px" value=${asgn.roles} onInput=${e => setAsgn({ ...asgn, roles: e.target.value })} placeholder="roles, comma-separated" />
+          <button class="btn btn-sm btn-secondary" onClick=${addAssignment}>Add</button>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>Role → permissions <span style="color:var(--text-muted);font-weight:normal">(JSON: { "role": ["perm", ...] })</span></label>
+        <textarea class="form-input" rows="4" style="font-family:monospace" value=${rpText} onInput=${e => { setRpText(e.target.value); setRpError(''); }}></textarea>
+        ${rpError && html`<p style="color:var(--danger,#c0392b);font-size:0.8rem;margin:var(--sp-1) 0 0">${rpError}</p>`}
+      </div>
+
+      <div style="display:flex;gap:var(--sp-2);justify-content:flex-end;margin-top:var(--sp-4)">
+        <button class="btn btn-secondary" onClick=${onClose}>Cancel</button>
+        <button class="btn btn-primary" onClick=${save}>Save</button>
+      </div>
+    </${Modal}>
+  `;
+}
+
 function App() {
   const [page, setPage] = useState('dashboard');
   const [authed, setAuthed] = useState(!!getApiKey());
@@ -1997,6 +2216,7 @@ function App() {
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: icons.dashboard },
     { id: 'users', label: 'Users', icon: icons.users },
+    { id: 'apps', label: 'Apps', icon: icons.apps },
     { id: 'roles', label: 'Roles', icon: icons.roles },
     { id: 'ldap', label: 'LDAP Settings', icon: icons.ldap },
     { id: 'mappings', label: 'Mappings', icon: icons.mappings },
@@ -2009,6 +2229,7 @@ function App() {
   const pages = {
     dashboard: Dashboard,
     users: UsersPage,
+    apps: AppsPage,
     roles: RolesPage,
     ldap: LDAPPage,
     mappings: MappingsPage,

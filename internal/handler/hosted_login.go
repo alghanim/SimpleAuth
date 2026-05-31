@@ -138,8 +138,15 @@ func (h *Handler) handleHostedLoginSubmit(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Validate redirect_uri
-	if redirectURI != "" && !isAllowedRedirect(h.getRedirectURIs(), redirectURI) {
+	// Resolve the app (v2) — optional client_id form field, else default app.
+	app, err := h.resolveApp(r.FormValue("client_id"))
+	if err != nil {
+		http.Error(w, "unknown app", http.StatusBadRequest)
+		return
+	}
+
+	// Validate redirect_uri (per-app allowlist when the app defines one)
+	if redirectURI != "" && !h.appAllowsRedirect(app, redirectURI) {
 		http.Error(w, "redirect_uri not allowed", http.StatusBadRequest)
 		return
 	}
@@ -151,8 +158,8 @@ func (h *Handler) handleHostedLoginSubmit(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	log.Printf("[hosted-login] Attempt user=%q ip=%s redirect_uri=%q", username, ip, redirectURI)
-	userGUID, ldapGroups, err := h.authenticateUser(username, password)
+	log.Printf("[hosted-login] Attempt user=%q app=%q ip=%s redirect_uri=%q", username, app.AppID, ip, redirectURI)
+	userGUID, ldapGroups, err := h.authenticateUser(username, password, app)
 	if err != nil {
 		log.Printf("[hosted-login] Failed user=%q ip=%s reason=%q", username, ip, err.Error())
 		h.audit("login_failed", "", ip, map[string]interface{}{
@@ -175,10 +182,13 @@ func (h *Handler) handleHostedLoginSubmit(w http.ResponseWriter, r *http.Request
 	// Assign default roles if needed
 	h.assignDefaultRoles(user.GUID)
 
-	// Issue tokens
-	roles, _ := h.store.GetUserRoles(user.GUID)
-	perms := h.resolveUserPermissions(user.GUID, roles)
-	accessToken, refreshToken, expiresIn, err := h.issueTokenPair(user, roles, perms, ldapGroups)
+	// Issue tokens (per-app roles + require_assignment, v2 M3)
+	roles, perms, denied := h.resolveTokenRoles(app, user)
+	if denied {
+		h.redirectToLoginError(w, r, redirectURI, "Access denied: not assigned to this app")
+		return
+	}
+	accessToken, refreshToken, expiresIn, err := h.issueTokenPair(user, roles, perms, ldapGroups, app)
 	if err != nil {
 		h.redirectToLoginError(w, r, redirectURI, "Token generation failed")
 		return
@@ -216,9 +226,17 @@ func (h *Handler) handleHostedLoginSubmit(w http.ResponseWriter, r *http.Request
 // presented to GET /login.
 func (h *Handler) completeHostedLoginWithSession(w http.ResponseWriter, r *http.Request, user *store.User, redirectURI string) {
 	ip := getClientIP(r)
-	roles, _ := h.store.GetUserRoles(user.GUID)
-	perms := h.resolveUserPermissions(user.GUID, roles)
-	accessToken, refreshToken, expiresIn, err := h.issueTokenPair(user, roles, perms, nil)
+	app, err := h.resolveApp(r.URL.Query().Get("client_id"))
+	if err != nil {
+		h.redirectToLoginError(w, r, redirectURI, "Unknown app")
+		return
+	}
+	roles, perms, denied := h.resolveTokenRoles(app, user)
+	if denied {
+		h.redirectToLoginError(w, r, redirectURI, "Access denied: not assigned to this app")
+		return
+	}
+	accessToken, refreshToken, expiresIn, err := h.issueTokenPair(user, roles, perms, nil, app)
 	if err != nil {
 		h.redirectToLoginError(w, r, redirectURI, "Token generation failed")
 		return

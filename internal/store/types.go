@@ -21,12 +21,34 @@ type User struct {
 	Disabled       bool      `json:"disabled"`
 	MergedInto     string    `json:"merged_into,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
+	// OwnerAppID, when set, marks this as an app-LOCAL user owned by that app
+	// (v2 M5): authenticated locally, only ever issued aud=owner-app tokens, and
+	// never shared via cross-app SSO. Empty = a global directory user.
+	OwnerAppID string `json:"owner_app_id,omitempty"`
 
 	// Password security
 	ForcePasswordChange bool       `json:"force_password_change,omitempty"`
 	PasswordHistory     []string   `json:"password_history,omitempty"`
 	FailedLoginAttempts int        `json:"failed_login_attempts,omitempty"`
 	LockedUntil         *time.Time `json:"locked_until,omitempty"`
+
+	// Groups holds the user's last-known directory group identifiers (refreshed
+	// on each LDAP/Kerberos login). Used to resolve per-app group assignments at
+	// token issuance (v2). Empty for local-only users.
+	Groups []string `json:"groups,omitempty"`
+}
+
+// AppAuthz holds an app's per-app authorization data (v2): its role catalog,
+// role→permission map, and user/group assignments. Keyed by app_id, managed by
+// the app itself (or the master admin). All maps are role-lists keyed by the
+// subject (user reference) or group identifier (sAMAccountName by default).
+type AppAuthz struct {
+	AppID            string              `json:"app_id"`
+	Roles            []string            `json:"roles,omitempty"`
+	Permissions      []string            `json:"permissions,omitempty"`
+	RolePermissions  map[string][]string `json:"role_permissions,omitempty"`
+	UserAssignments  map[string][]string `json:"user_assignments,omitempty"`
+	GroupAssignments map[string][]string `json:"group_assignments,omitempty"`
 }
 
 type LDAPConfig struct {
@@ -48,6 +70,26 @@ type LDAPConfig struct {
 	ConfiguredAt    time.Time `json:"configured_at"`
 }
 
+// App is a registered application (OAuth client) with its own per-app
+// authorization scope (v2). The AppID partitions all per-app roles, permissions,
+// and assignments; SecretHash authenticates the app for self-management and
+// confidential token flows. SecretHash is never returned by the API.
+type App struct {
+	AppID             string    `json:"app_id"`
+	Name              string    `json:"name"`
+	Audience          string    `json:"audience"`
+	SecretHash        string    `json:"secret_hash,omitempty"`
+	RedirectURIs      []string  `json:"redirect_uris,omitempty"`
+	CORSOrigins       []string  `json:"cors_origins,omitempty"`
+	RequireAssignment bool      `json:"require_assignment"`
+	AllowLocalUsers   bool      `json:"allow_local_users"`
+	Disabled          bool      `json:"disabled,omitempty"`
+	CreatedAt         time.Time `json:"created_at"`
+	// SecretRotatedAt is set when the app secret is rotated; app-management tokens
+	// issued before this instant are rejected so rotation revokes them (L4).
+	SecretRotatedAt time.Time `json:"secret_rotated_at,omitempty"`
+}
+
 type IdentityMapping struct {
 	Provider   string `json:"provider"`
 	ExternalID string `json:"external_id"`
@@ -66,6 +108,10 @@ type RefreshToken struct {
 	Used      bool      `json:"used"`
 	ExpiresAt time.Time `json:"expires_at"`
 	CreatedAt time.Time `json:"created_at"`
+	// AppID/Audience bind the token family to one app (v2). A refresh token for
+	// app A only ever mints app-A access tokens (aud = Audience).
+	AppID    string `json:"app_id,omitempty"`
+	Audience string `json:"audience,omitempty"`
 }
 
 type AuditEntry struct {
@@ -89,6 +135,7 @@ type AuditQuery struct {
 type OIDCAuthCode struct {
 	Code        string    `json:"code"`
 	UserGUID    string    `json:"user_guid"`
+	AppID       string    `json:"app_id,omitempty"` // resolved from client_id at authorize (v2)
 	RedirectURI string    `json:"redirect_uri"`
 	Scope       string    `json:"scope"`
 	Nonce       string    `json:"nonce"`

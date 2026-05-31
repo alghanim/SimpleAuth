@@ -1,38 +1,75 @@
 <p align="center">
-  <h1 align="center">SimpleAuth</h1>
+  <h1 align="center">🔐 SimpleAuth</h1>
   <p align="center">
-    <strong>The simplest way to add authentication to any app.</strong><br>
-    Single binary &bull; 10MB &bull; Zero dependencies &bull; Full Kerberos SSO &bull; Standard OIDC provider
+    <strong>Enterprise authentication that fits in a single 10&nbsp;MB binary.</strong><br>
+    Active Directory · Kerberos SSO · a standard OIDC provider · signed JWTs — running in <strong>3 commands</strong>.
   </p>
   <p align="center">
-    <a href="docs/QUICKSTART.md">Quick Start</a> &middot;
-    <a href="docs/API.md">API Reference</a> &middot;
-    <a href="docs/ACTIVE-DIRECTORY.md">AD Guide</a> &middot;
-    <a href="docs/SDK-GUIDE.md">SDKs</a>
+    <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-22c55e.svg">
+    <img alt="Made with Go" src="https://img.shields.io/badge/built%20with-Go-00ADD8.svg">
+    <img alt="Single binary" src="https://img.shields.io/badge/deploy-single%20binary-6366f1.svg">
+    <img alt="No dependencies" src="https://img.shields.io/badge/dependencies-0-orange.svg">
+    <img alt="Security audited" src="https://img.shields.io/badge/security-self--audited-ef4444.svg">
+  </p>
+  <p align="center">
+    <a href="docs/QUICKSTART.md">Quick Start</a> ·
+    <a href="docs/API.md">API Reference</a> ·
+    <a href="docs/ACTIVE-DIRECTORY.md">AD&nbsp;+&nbsp;Kerberos</a> ·
+    <a href="docs/SDK-GUIDE.md">SDKs</a> ·
+    <a href="SECURITY-AUDIT.md">Security Audit Log</a> ·
+    <a href="#-contributing">Contributing</a>
   </p>
 </p>
 
 ---
 
-SimpleAuth is an identity server that ships as a single Go binary. It connects to Active Directory, handles Kerberos/SPNEGO for transparent Windows SSO, serves as a standard OIDC provider, and issues RS256 JWTs. No Java. No containers required. No config files after first run -- everything is managed from the built-in admin UI.
+Setting up authentication shouldn't mean standing up a Java cluster, a database, a cache, and a weekend. **SimpleAuth is the whole identity layer — Active Directory login, transparent Windows SSO, a standards-compliant OIDC provider, and RS256 JWTs — in one Go binary you can `scp` to a box and run.**
 
-Each instance serves one application. Users are auto-created on first login from any provider. No import. No sync. No migration.
+No Java. No mandatory database. No config files after first run. Everything is managed from a built-in admin UI, and a domain-joined machine gets you to **two-click Kerberos SSO**. Drop it in, point your app at it, ship.
 
-## Why SimpleAuth?
+```bash
+docker run -d -p 8080:8080 \
+  -e AUTH_HOSTNAME=auth.example.com \
+  -e AUTH_ADMIN_KEY=change-me \
+  -e AUTH_REDIRECT_URIS="https://myapp.example.com/*" \
+  -v simpleauth-data:/data \
+  simpleauth
+# → admin UI at https://auth.example.com/sauth/admin. That's it.
+```
 
-| | Keycloak | ADFS | SimpleAuth |
-|---|---------|------|------------|
-| **Setup** | Hours (Java, Postgres, Redis) | Hours + Windows Server | **3 commands** |
-| **Size** | ~500MB+ | N/A | **~10MB** |
-| **Kerberos SSO** | Complex manual config | Built-in but rigid | **2-click auto-config** |
-| **OIDC** | Full provider | Claims-based | **Full provider** |
-| **REST API** | Complex | None | **Simple JSON + JWTs** |
-| **Admin UI** | Steep learning curve | Windows-only | **Everything in one page** |
-| **Deployment** | Cluster + database | Domain controller | **Single binary, optional DB** |
+## ✨ Why you'll like it
 
-## Quick Start
+**It's powerful.** Everything a real identity provider needs, nothing watered down:
 
-### Docker
+- 🪪 **Active Directory & LDAP** — bind login, attribute sync, group membership, auto-discovery.
+- 🎫 **Transparent Kerberos / SPNEGO SSO** — users on the domain are logged in *without typing anything*. SSO setup is a downloadable PowerShell script and one paste-back — no `ktpass`, no keytab files, no hand-edited LDAP.
+- 🌐 **A standard OIDC provider** — discovery, authorization-code flow with **PKCE**, token, userinfo, JWKS, introspection, end-session. Works with any OIDC client library, in any language.
+- 🔑 **RS256 JWTs** — auto-generated RSA-2048 keys, a JWKS endpoint for offline verification, single-use **refresh-token rotation** with family replay detection.
+- 👥 **Roles, permissions & groups** — resolved into the token your app already trusts.
+
+**It's simple.** The kind of simple you feel in the first five minutes:
+
+- 📦 **One ~10 MB binary.** No runtime, no JVM, no sidecars. BoltDB is embedded — **zero external dependencies** to start.
+- 🖥️ **A real admin UI** (dark mode included) — users, roles, LDAP, audit log, settings, database, all on a page. No XML, no `kcadm.sh`.
+- ⚡ **3 commands to running**, and users are auto-created on first login from any provider — no import, no sync, no migration job.
+- 🧩 **Embeddable** — `import "simpleauth/pkg/server"` and your Go app *is* the auth server.
+- 📚 **Official SDKs** for JavaScript/TypeScript, Go, Python, and .NET, each with framework middleware.
+
+## SimpleAuth vs. the usual suspects
+
+| | Keycloak | ADFS | **SimpleAuth** |
+|---|---|---|---|
+| **Setup** | Hours (Java + Postgres + cache) | Hours + Windows Server | **3 commands** |
+| **Footprint** | ~500 MB+ | A domain controller | **~10 MB binary** |
+| **External deps** | Database + cache required | Windows infra | **None** (optional Postgres) |
+| **Kerberos SSO** | Manual, fiddly | Built-in but rigid | **Two-click auto-config** |
+| **OIDC provider** | Full | Claims-based | **Full** |
+| **Admin experience** | Steep | Windows-only MMC | **One web page** |
+| **REST API** | Sprawling | None | **Clean JSON + JWTs** |
+
+## 🚀 Quick start
+
+**Docker:**
 
 ```bash
 docker run -d -p 8080:8080 \
@@ -44,7 +81,7 @@ docker run -d -p 8080:8080 \
   simpleauth
 ```
 
-### Binary
+**Binary:**
 
 ```bash
 ./simpleauth init-config     # generates simpleauth.yaml
@@ -52,396 +89,138 @@ vim simpleauth.yaml          # set hostname, redirect URIs, admin key
 ./simpleauth                 # running
 ```
 
-Admin UI is at `https://<hostname>/sauth/admin`. Enter your admin key to log in.
+Open the admin UI at `https://<hostname>/sauth/admin` and sign in with your admin key. (Omit `AUTH_ADMIN_KEY` and one is generated on first run and printed to the logs.)
 
-If you omit `AUTH_ADMIN_KEY`, one is auto-generated on first run and printed to stdout -- check your logs.
+> **For any real deployment, set three things:** `AUTH_HOSTNAME`, `AUTH_ADMIN_KEY`, and `AUTH_REDIRECT_URIS`. Without an allowlist, every login redirect is rejected — by design.
 
-> **Required for any real deployment:** `AUTH_HOSTNAME`, `AUTH_ADMIN_KEY`, and `AUTH_REDIRECT_URIS`. Without redirect URIs, all login redirects are rejected.
+New to OAuth/OIDC? The [Quick Start](docs/QUICKSTART.md) walks you from zero to a logged-in user, and the [Integration Guide](docs/API.md) explains every term (JWT, redirect URI, CORS, the `/sauth` base path) in plain language.
 
----
+## 🔌 Add it to your app
 
-## Integration Guide
+Pick whichever fits — you can mix them:
 
-This section explains how to add SimpleAuth to your app, step by step. No prior knowledge of OAuth2 or OIDC is needed.
-
-### What You Need to Know First
-
-- **What is SimpleAuth?** -- It is an authentication server. Your app talks to it over HTTP. SimpleAuth stores users, handles passwords, and issues tokens that prove a user is logged in. Your app never touches passwords directly.
-
-- **What is a JWT?** -- A JWT (JSON Web Token) is a signed string your app receives after a user logs in. It contains the user's name, email, roles, and an expiration time (15 minutes by default). Your app sends it in the `Authorization: Bearer <token>` header on every API request to prove the user is authenticated.
-
-- **What is a redirect URI?** -- When a user logs in through SimpleAuth's hosted login page, SimpleAuth needs to send them back to YOUR app with the tokens. The redirect URI is the URL in your app where SimpleAuth sends the user after login. You MUST tell SimpleAuth which URLs are allowed (via `AUTH_REDIRECT_URIS`), or it rejects the redirect for security.
-
-- **What is CORS?** -- If your frontend JavaScript (running in a browser) calls SimpleAuth directly (not through your backend), the browser blocks the request unless SimpleAuth explicitly allows your frontend's domain. Set `AUTH_CORS_ORIGINS` to your frontend's URL to allow this.
-
-- **What is the base path?** -- SimpleAuth serves everything under `/sauth` by default. Every URL starts with `https://your-host/sauth/...`. Do not forget this prefix -- it is the most common integration mistake.
-
-- **What is the admin key?** -- A secret string that grants access to the admin API and admin UI. Set it via `AUTH_ADMIN_KEY`. If you do not set it, SimpleAuth auto-generates one on first run and prints it to stdout (check your container logs).
-
-### Step-by-Step: Integrate with Any App
-
-All examples below use `https://auth.example.com` as the SimpleAuth host (assuming a reverse proxy handles TLS on port 443). Replace it with your actual hostname.
-
----
-
-#### Step 1: Deploy SimpleAuth
-
-```bash
-docker run -d -p 8080:8080 \
-  -e AUTH_HOSTNAME=auth.example.com \
-  -e AUTH_ADMIN_KEY=my-secret-admin-key \
-  -e AUTH_REDIRECT_URIS="https://myapp.example.com/callback,https://myapp.example.com/*" \
-  -e AUTH_CORS_ORIGINS="https://myapp.example.com" \
-  -v simpleauth-data:/data \
-  simpleauth
-```
-
-| Variable | What it does |
-|----------|-------------|
-| `AUTH_HOSTNAME` | The public domain name where SimpleAuth is reachable (used for TLS cert and token issuer). |
-| `AUTH_ADMIN_KEY` | Secret key to access the admin UI and admin API -- keep it safe. |
-| `AUTH_REDIRECT_URIS` | Comma-separated list of URLs where SimpleAuth is allowed to redirect users after login (supports `*` wildcards). |
-| `AUTH_CORS_ORIGINS` | Comma-separated list of frontend domains allowed to call SimpleAuth from the browser. |
-| `-v simpleauth-data:/data` | Persistent volume for the database, RSA keys, and TLS certs -- do not lose this. |
-
----
-
-#### Step 2: Create a User
-
-**Option A: Admin UI**
-
-Open `https://auth.example.com/sauth/admin` in your browser. Enter your admin key. Click "Users" and create a user.
-
-**Option B: Bootstrap API (curl)**
-
-The bootstrap endpoint is idempotent -- safe to call on every app startup.
-
-```bash
-curl -X POST https://auth.example.com/sauth/api/admin/bootstrap \
-  -H "Authorization: Bearer my-secret-admin-key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "permissions": ["read", "write"],
-    "role_permissions": {
-      "admin": ["read", "write"],
-      "viewer": ["read"]
-    },
-    "users": [
-      {
-        "username": "alice",
-        "password": "secret123",
-        "display_name": "Alice Smith",
-        "email": "alice@example.com",
-        "roles": ["admin"]
-      }
-    ]
-  }'
-```
-
-Response:
-
-```json
-{
-  "users": [
-    { "username": "alice", "guid": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx", "created": true }
-  ],
-  "permissions_count": 2,
-  "role_permissions_count": 2
-}
-```
-
----
-
-#### Step 3: Log In and Get Tokens
-
-There are three ways to log in. Pick the one that fits your app.
-
-**Flow A: Direct API (your backend calls SimpleAuth)**
-
-Best for: mobile apps, SPAs that talk to your backend, server-to-server.
+**1. Direct REST** — best for mobile, SPAs with a backend, and server-to-server.
 
 ```bash
 curl -X POST https://auth.example.com/sauth/api/auth/login \
   -H "Content-Type: application/json" \
   -d '{"username":"alice","password":"secret123"}'
+# → { "access_token": "eyJ…", "refresh_token": "eyJ…", "expires_in": 900 }
 ```
 
-Response:
+**2. Hosted login page** — best for web apps that don't want to build a login form. Redirect to `…/sauth/login?redirect_uri=https://myapp/callback`; SimpleAuth (or Kerberos SSO) authenticates the user and hands the tokens back on the callback.
 
-```json
-{
-  "access_token": "eyJhbGciOiJSUzI1NiIs...",
-  "refresh_token": "eyJhbGciOiJSUzI1NiIs...",
-  "expires_in": 900,
-  "token_type": "Bearer"
-}
-```
-
-- `access_token` -- send this in the `Authorization: Bearer <token>` header on every request. Expires in 900 seconds (15 minutes).
-- `refresh_token` -- use this to get a new access token when the old one expires (see Step 5).
-- `expires_in` -- seconds until the access token expires.
-
-**Flow B: Hosted Login Page (redirect users to SimpleAuth)**
-
-Best for: web apps that do not want to build their own login form.
-
-1. Your app redirects the user's browser to:
-   ```
-   https://auth.example.com/sauth/login?redirect_uri=https://myapp.example.com/callback
-   ```
-2. The user sees SimpleAuth's login page and enters their username/password (or is auto-logged in via Kerberos SSO).
-3. After successful login, SimpleAuth redirects the user's browser to:
-   ```
-   https://myapp.example.com/callback#access_token=eyJ...&refresh_token=eyJ...&expires_in=900&token_type=Bearer
-   ```
-4. Your app extracts the tokens from the URL fragment (the part after `#`). In JavaScript:
-   ```javascript
-   const params = new URLSearchParams(window.location.hash.substring(1));
-   const accessToken = params.get('access_token');
-   const refreshToken = params.get('refresh_token');
-   ```
-
-**Flow C: OIDC (standard OAuth2 authorization code flow)**
-
-Best for: apps using an OIDC client library (any language), or when you need an `id_token`.
-
-1. **Discovery** -- your OIDC library fetches this automatically:
-   ```
-   GET https://auth.example.com/sauth/.well-known/openid-configuration
-   ```
-
-2. **Redirect the user** to the authorization endpoint:
-   ```
-   https://auth.example.com/sauth/realms/simpleauth/protocol/openid-connect/auth?client_id=simpleauth&redirect_uri=https://myapp.example.com/callback&response_type=code&state=RANDOM_STRING
-   ```
-   - `client_id` is always `simpleauth`. No client secret needed.
-   - `state` is a random string you generate to prevent CSRF. Your app must verify it matches when the user comes back.
-
-3. **User logs in** and SimpleAuth redirects to:
-   ```
-   https://myapp.example.com/callback?code=AUTH_CODE_HERE&state=RANDOM_STRING
-   ```
-
-4. **Exchange the code for tokens** (your backend calls SimpleAuth):
-   ```bash
-   curl -X POST https://auth.example.com/sauth/realms/simpleauth/protocol/openid-connect/token \
-     -d "grant_type=authorization_code" \
-     -d "code=AUTH_CODE_HERE" \
-     -d "redirect_uri=https://myapp.example.com/callback" \
-     -d "client_id=simpleauth"
-   ```
-
-5. **Response** contains `access_token`, `refresh_token`, and `id_token`.
-
----
-
-#### Step 4: Verify Tokens
-
-Your app needs to verify that the access token is valid and not expired.
-
-**Option A: Local verification (recommended)**
-
-Fetch the public keys once from the JWKS endpoint and verify the RS256 signature locally. Every JWT library supports this.
+**3. Standard OIDC** — best when you already use an OIDC client library or need an `id_token`. Point your library at the discovery URL and you're done:
 
 ```
-JWKS URL: https://auth.example.com/sauth/.well-known/jwks.json
+https://auth.example.com/sauth/.well-known/openid-configuration
 ```
 
-This is the fastest option -- no network call on every request. Cache the JWKS keys and refresh them periodically (e.g., every hour).
+Then verify tokens **offline** against the JWKS endpoint (no network call per request), or call `/sauth/api/auth/userinfo` to introspect. Full walkthrough with every flow: [docs/API.md](docs/API.md).
 
-**Option B: UserInfo endpoint**
+### Use an SDK instead of raw HTTP
 
-Call SimpleAuth on every request to validate the token and get user info:
+| Language | Package | Install |
+|---|---|---|
+| **JavaScript / TypeScript** | `@simpleauth/js` | `npm install @simpleauth/js` |
+| **Go** | `github.com/bodaay/simpleauth-go` | `go get github.com/bodaay/simpleauth-go` |
+| **Python** | `simpleauth` | `pip install simpleauth` |
+| **.NET** | `SimpleAuth` | reference the project |
+
+Every SDK does login/refresh/userinfo, **offline JWT verification with cached JWKS**, role/permission helpers (`HasRole`, `HasPermission`, `HasAnyRole`), and ships middleware for Express, `net/http`, FastAPI/Flask/Django, and ASP.NET Core. See [examples/](examples/).
+
+## 🧰 What's in the box
+
+<table>
+<tr><td valign="top" width="50%">
+
+**Authentication**
+- Kerberos/SPNEGO transparent Windows SSO
+- Optional shared SSO session cookie (log in once, skip the login page across apps)
+- Auto-SSO with a countdown + cancel
+- LDAP bind login for non-domain users
+- Local passwords (bcrypt, policy, history)
+- Account lockout after repeated failures
+- Hosted login page + standard OIDC
+- Admin impersonation (fully audited)
+
+</td><td valign="top" width="50%">
+
+**Tokens & authorization**
+- RS256 JWTs, auto-generated RSA-2048 keys
+- JWKS endpoint for offline verification
+- Refresh-token rotation + family replay detection + revocation
+- Roles, permissions, and role→permission mapping
+- Default roles auto-assigned on first login
+- AD/LDAP groups surfaced in the token
+
+</td></tr>
+<tr><td valign="top">
+
+**Admin UI** (dark mode, one page)
+- Users: CRUD, disable, merge, unlock, force reset
+- Roles & permissions
+- LDAP providers + AD setup script + Kerberos
+- Identity mappings & audit log
+- Runtime settings (redirects, CORS, policy, rate limits)
+- Database stats, migration, backend switching, restart
+
+</td><td valign="top">
+
+**Ops & storage**
+- **BoltDB** embedded by default — zero config
+- **PostgreSQL** optional (`AUTH_POSTGRES_URL`), migrate either way from the UI, auto-fallback if it's unreachable
+- Per-IP rate limiting with trusted-proxy support
+- CSRF protection on login forms; strict redirect allowlist
+- Live backup/restore via the API
+- Linux SSO setup script (krb5.conf + every major browser)
+
+</td></tr>
+</table>
+
+## 🛡️ Security is the whole point
+
+SimpleAuth guards the front door, so security isn't a feature — it's the product. A few things we do differently:
+
+- **A public, living audit trail.** [`SECURITY-AUDIT.md`](SECURITY-AUDIT.md) logs every security review, finding, and fix — dated, with stable IDs, by **different AI models and humans** over time. Nothing is swept under the rug; even `WONTFIX` decisions are written down with rationale. It's unusual to publish your own audit log. We think a project that protects logins should.
+- **Sane defaults that fail closed.** Redirect URIs are a strict allowlist (empty = reject all). The confidential OIDC grants (`password`, `client_credentials`) and token introspection are **disabled unless you set `AUTH_CLIENT_SECRET`**. Trusted proxies default to *trust none*.
+- **Modern token hygiene.** RS256 only (no alg-confusion), JWKS with a stable key id, single-use refresh tokens with replay detection, an access-revocation kill switch, and authenticator-verified Kerberos with a replay cache and clock-skew enforcement.
+- **Defense in depth.** bcrypt password hashing with a configurable policy and history, account lockout, per-IP rate limiting, CSRF tokens, and security headers across responses.
+
+Found something? Please **open a security advisory** (or a private report) rather than a public issue — see [Contributing](#-contributing). Then add it to the audit log; that's exactly what it's for.
+
+## 🤝 Contributing
+
+**This project is public on purpose.** SimpleAuth protects authentication, and security software gets better with more eyes on it. If you've ever wanted to work on an auth server that's small enough to actually read end-to-end in an afternoon — this is that codebase.
+
+**Especially valuable:**
+
+- 🔍 **Security review.** Read [`SECURITY-AUDIT.md`](SECURITY-AUDIT.md), then audit a flow (login, refresh rotation, Kerberos, OIDC grants, the store layer) and send what you find — a PR, an issue, or a new audit pass appended to the log. The file even contains the prompt we hand to each reviewer.
+- 🧩 **More SDKs & framework middleware.** Rust, Java, PHP, Ruby — or deeper middleware for the four we already ship.
+- 📖 **Docs & examples.** A clearer explanation, a new framework example in [examples/](examples/), a fixed typo — all welcome.
+- 🐛 **Bugs & papercuts.** Edge cases in LDAP/Kerberos against real directories are gold.
+
+**Get going in a minute:**
 
 ```bash
-curl https://auth.example.com/sauth/api/auth/userinfo \
-  -H "Authorization: Bearer eyJhbGciOiJSUzI1NiIs..."
+git clone <your-fork>
+cd SimpleAuth
+go build ./...        # builds the single binary
+go test ./...         # full suite (no external services needed)
+go vet ./...
 ```
 
-Response:
+Open a PR with a focused change and a test, and keep the trio in sync — **code, docs, and the SDKs/examples** for any surface you touch. New features ship with all of it. First time here? Open an issue describing what you'd like to do and we'll point you at the right file.
 
-```json
-{
-  "guid": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-  "preferred_username": "alice",
-  "samaccountname": "alice",
-  "display_name": "Alice Smith",
-  "email": "alice@example.com",
-  "department": "Engineering",
-  "company": "Example Corp",
-  "job_title": "Developer",
-  "roles": ["admin"],
-  "permissions": ["read", "write"],
-  "groups": ["Domain Users"],
-  "auth_source": "local"
-}
-```
+## 📚 Reference
 
----
+<details>
+<summary><strong>OIDC endpoints</strong></summary>
 
-#### Step 5: Refresh Tokens
-
-Access tokens expire in 15 minutes. Use the refresh token to get a new access token without asking the user to log in again.
-
-```bash
-curl -X POST https://auth.example.com/sauth/api/auth/refresh \
-  -H "Content-Type: application/json" \
-  -d '{"refresh_token":"eyJhbGciOiJSUzI1NiIs..."}'
-```
-
-Response:
-
-```json
-{
-  "access_token": "eyJ_NEW_ACCESS_TOKEN...",
-  "refresh_token": "eyJ_NEW_REFRESH_TOKEN...",
-  "expires_in": 900,
-  "token_type": "Bearer"
-}
-```
-
-**IMPORTANT:** SimpleAuth uses refresh token rotation. Each time you refresh, you get a NEW refresh token. The old refresh token is revoked. Always store and use the latest refresh token from the response. If you accidentally use an old refresh token, SimpleAuth revokes the entire token family for security.
-
----
-
-#### Step 6: Logout
-
-Redirect the user to SimpleAuth's logout endpoint:
-
-```
-https://auth.example.com/sauth/logout?redirect_uri=https://myapp.example.com/
-```
-
-This clears the user's SSO cookies and redirects them back to the login page (or to your app if you provide a redirect URI).
-
-On your app's side, delete the stored access token and refresh token.
-
----
-
-### Common Mistakes
-
-| Mistake | Fix |
-|---------|-----|
-| Forgetting `/sauth` in URLs | Every SimpleAuth URL starts with `/sauth` (e.g., `/sauth/api/auth/login`, not `/api/auth/login`). |
-| Not setting `AUTH_REDIRECT_URIS` | Without this, all redirects are rejected. Set it to your app's callback URL(s). |
-| Not refreshing tokens | Access tokens expire in 15 minutes. Your app must call the refresh endpoint before they expire. |
-| Reusing old refresh tokens | After refreshing, always use the NEW refresh token from the response. The old one is revoked (token rotation). |
-| Not setting `AUTH_TRUSTED_PROXIES` | If SimpleAuth is behind nginx/Traefik/Caddy, rate limiting sees the proxy's IP instead of the client's. Set `AUTH_TRUSTED_PROXIES` to your proxy's CIDR (e.g., `172.16.0.0/12`). |
-| Not setting `AUTH_CORS_ORIGINS` | If your browser-based frontend calls SimpleAuth directly, set this to your frontend's origin (e.g., `https://myapp.example.com`). Without it, browsers block the requests. |
-| Using `http` instead of `https` in redirect URIs | Redirect URIs must match exactly, including the scheme. If your app uses `https`, the redirect URI must use `https`. |
-| Not bootstrapping on startup | If your app defines roles/permissions, call `POST /sauth/api/admin/bootstrap` on EVERY startup. It's idempotent. See [Deployment Guide](docs/DEPLOYMENT-GUIDE.md). |
-| Hardcoding admin key in code | Use environment variables (`AUTH_ADMIN_KEY`). Never commit secrets to source control. |
-| **Kerberos SSO silently fails behind nginx** | nginx's default buffers (4KB) are too small for Negotiate headers. Click does nothing, no logs anywhere. Add **all four**: `proxy_buffer_size 128k`, `proxy_buffers 4 256k`, `large_client_header_buffers 4 64k`, `client_header_buffer_size 64k`. The last two are both needed — some nginx builds drop oversized headers if only one is set. See [Deployment Guide](docs/DEPLOYMENT-GUIDE.md#nginx-example). |
-
----
-
-### JWT Token Structure
-
-When you decode an access token (using any JWT library or [jwt.io](https://jwt.io)), the payload looks like this:
-
-```json
-{
-  "sub": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-  "guid": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-  "preferred_username": "alice",
-  "samaccountname": "alice",
-  "name": "Alice Smith",
-  "email": "alice@example.com",
-  "department": "Engineering",
-  "company": "Example Corp",
-  "job_title": "Developer",
-  "roles": ["admin"],
-  "permissions": ["read", "write"],
-  "groups": ["Domain Users"],
-  "iss": "https://auth.example.com/sauth/realms/simpleauth",
-  "exp": 1234567890,
-  "iat": 1234567000
-}
-```
-
-| Claim | Description |
-|-------|-------------|
-| `sub` | User's unique GUID (same as `guid`). Never changes, even if the username changes. |
-| `preferred_username` | The user's login name (e.g., `alice`). Best-effort — may be UPN-shaped (`user@domain`) in some AD deployments. Do NOT use for authz lookups in authn-only apps. |
-| `samaccountname` | **Authoritative AD sAMAccountName.** Captured from LDAP on every login, stable across email/UPN/display-name changes. The correct key for apps that maintain their own authz tables. Absent for local (non-AD) users. Self-heals on next login for users who existed before this claim. See [docs/API.md](docs/API.md#pattern-authn-only-apps-with-their-own-authz-table). |
-| `name` | Display name. |
-| `email` | Email address. In many AD deployments admins reuse this for role accounts — do NOT use as a stable authz key. |
-| `roles` | Array of role names assigned to the user. |
-| `permissions` | Array of permission strings resolved from the user's roles. |
-| `groups` | LDAP/AD group memberships (empty for local-only users). |
-| `department`, `company`, `job_title` | Profile fields synced from LDAP/AD or set manually. |
-| `iss` | Issuer URL. Always `https://<hostname>/sauth/realms/simpleauth`. |
-| `exp` | Expiration time (Unix timestamp). |
-| `iat` | Issued-at time (Unix timestamp). |
-
----
-
-## Features
-
-### Authentication
-- **Kerberos/SPNEGO** -- transparent Windows SSO with auto-configured keytab
-- **Auto-SSO** -- optional automatic SSO attempt with countdown animation and cancel button (`AUTH_AUTO_SSO=true`)
-- **Shared SSO session cookie** -- optional (`AUTH_ENABLE_SESSION_SSO=true`). Once logged in via any flow (password/Kerberos/OIDC), the browser carries a scoped HttpOnly cookie on the SimpleAuth host. Subsequent redirects from any participating app skip the login page entirely. Two TTLs: idle (8h default, bumped on every SimpleAuth visit) and absolute max (30 days default). Single-logout and admin-revocation supported. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#shared-sso-session-cookie).
-- **LDAP bind** -- form-based login for non-domain users
-- **Local passwords** -- bcrypt-hashed, configurable policy (length, complexity, history)
-- **Account lockout** -- automatic lockout after repeated failures
-- **Hosted login page** -- redirect-based flow at `/sauth/login`, apps don't need their own login form
-- **Standard OIDC provider** -- discovery, authorization code flow, token endpoint, userinfo
-- **Impersonation** -- admins generate tokens as any user, fully audited
-
-### Authorization
-- **RS256 JWTs** -- auto-generated RSA-2048 keys, 15-minute access tokens, 30-day refresh tokens
-- **JWKS endpoint** -- `/.well-known/jwks.json` for offline token verification
-- **Roles and permissions** -- global to the instance, assigned to users, with role-permission mapping
-- **Default roles** -- auto-assigned to new users on first login
-- **Refresh token rotation** -- family-based replay detection with automatic revocation
-
-### Admin UI
-Full management dashboard at `/sauth/admin` with dark mode:
-- Users (CRUD, disable, merge, unlock, force password change)
-- Roles and permissions
-- LDAP providers with auto-discovery and AD setup script
-- Identity mappings
-- Audit log with configurable retention
-- Runtime settings (redirect URIs, CORS, password policy, rate limiting)
-- Database management (stats, migration, backend switching)
-- Server restart
-
-### Database
-- **BoltDB** (default) -- embedded, zero config, zero dependencies
-- **PostgreSQL** (optional) -- set `AUTH_POSTGRES_URL` to enable
-- **Migrate between backends** from the Admin UI
-- **Automatic fallback** -- if Postgres is unreachable, falls back to BoltDB
-
-### Security
-
-| Area | Implementation |
-|------|---------------|
-| JWT signing | RS256, auto-generated RSA-2048, JWKS endpoint |
-| Token revocation | Access token blacklist + refresh token replay detection |
-| Passwords | Bcrypt, configurable policy, password history |
-| Account lockout | Configurable threshold and duration |
-| CSRF | Token-based on all login forms |
-| Rate limiting | Per-IP, configurable window/threshold, trusted proxy support |
-| Redirect validation | Strict allowlist; empty list = reject all |
-| Trusted proxies | Default: trust none; explicit CIDR configuration required |
-
-### Developer Experience
-- **Standard OIDC provider** -- works with any OIDC client library in any language
-- **Direct REST API** -- simple JSON endpoints for lightweight integrations
-- **Client SDKs** -- official libraries for JS/TS, Go, Python, .NET
-- **Embeddable** -- `pkg/server` package for embedding in any Go application
-- **Linux SSO script** -- auto-generated bash script configures krb5.conf + all major browsers
-- **Backup/restore** -- live BoltDB snapshots via API
-
-## OIDC Endpoints
-
-SimpleAuth is a standard OpenID Connect provider. Use any OIDC client library.
-
-**Discovery:** `GET /.well-known/openid-configuration`
+Discovery: `GET /.well-known/openid-configuration`
 
 | Endpoint | Method | Path |
-|----------|--------|------|
+|---|---|---|
 | Authorization | `GET` | `/realms/{issuer}/protocol/openid-connect/auth` |
 | Token | `POST` | `/realms/{issuer}/protocol/openid-connect/token` |
 | UserInfo | `GET/POST` | `/realms/{issuer}/protocol/openid-connect/userinfo` |
@@ -449,241 +228,109 @@ SimpleAuth is a standard OpenID Connect provider. Use any OIDC client library.
 | Introspection | `POST` | `/realms/{issuer}/protocol/openid-connect/token/introspect` |
 | End Session | `GET/POST` | `/realms/{issuer}/protocol/openid-connect/logout` |
 
-**Supported flows:** `authorization_code` and `refresh_token` are public (no client secret). The authorization-code flow supports **PKCE** (S256). The `password` and `client_credentials` grants and **token introspection** are confidential: they are **disabled unless you set `AUTH_CLIENT_SECRET`**, and then require that secret (`client_secret` via post body or HTTP Basic).
+`authorization_code` and `refresh_token` are public flows (auth-code supports PKCE/S256). `password`, `client_credentials`, and introspection are confidential — disabled unless `AUTH_CLIENT_SECRET` is set, then require that secret.
 
-```bash
-# Example: Authorization Code Flow
-curl "https://auth.example.com/sauth/.well-known/openid-configuration"
+</details>
 
-# Token exchange
-curl -X POST "https://auth.example.com/sauth/realms/simpleauth/protocol/openid-connect/token" \
-  -d "grant_type=authorization_code&code=AUTH_CODE&redirect_uri=https://myapp.example.com/callback"
-```
-
-## Direct API
-
-For simple integrations that don't need full OIDC.
-
-```bash
-# Login
-curl -X POST https://auth.example.com/sauth/api/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username": "jsmith", "password": "secret"}'
-
-# Response: { "access_token": "eyJ...", "refresh_token": "...", "user": {...} }
-
-# Refresh
-curl -X POST https://auth.example.com/sauth/api/auth/refresh \
-  -H "Content-Type: application/json" \
-  -d '{"refresh_token": "..."}'
-
-# UserInfo
-curl https://auth.example.com/sauth/api/auth/userinfo \
-  -H "Authorization: Bearer eyJ..."
-```
+<details>
+<summary><strong>Direct API</strong></summary>
 
 | Method | Path | Description |
-|--------|------|-------------|
+|---|---|---|
 | `POST` | `/api/auth/login` | Login, get JWT tokens |
 | `POST` | `/api/auth/refresh` | Rotate refresh token |
-| `GET` | `/api/auth/userinfo` | Current user info from JWT |
+| `GET` | `/api/auth/userinfo` | Current user from the JWT |
 | `GET` | `/api/auth/negotiate` | Kerberos/SPNEGO SSO |
-| `POST` | `/api/auth/impersonate` | Generate token as another user (admin) |
+| `POST` | `/api/auth/impersonate` | Token as another user (admin) |
 | `POST` | `/api/auth/reset-password` | Change password (authenticated) |
-| `GET` | `/login` | Hosted login page |
-| `GET` | `/logout` | Clear SSO cookies, redirect to login |
-| `GET` | `/account` | Self-service profile + password change |
+| `GET` | `/login` · `/logout` · `/account` | Hosted pages |
 | `GET` | `/.well-known/jwks.json` | JWKS public keys |
 | `GET` | `/health` | Health check |
 
-## Admin API
+</details>
 
-All admin endpoints require `Authorization: Bearer <admin-key>`.
+<details>
+<summary><strong>Admin API</strong> (all require <code>Authorization: Bearer &lt;admin-key&gt;</code>)</summary>
 
 | Category | Endpoints |
-|----------|-----------|
-| **Bootstrap** | `POST /api/admin/bootstrap` -- idempotent: define roles, permissions, ensure users |
+|---|---|
+| **Bootstrap** | `POST /api/admin/bootstrap` — idempotent: define roles, permissions, ensure users |
 | **Users** | CRUD `/api/admin/users`, merge/unmerge, disable, unlock, sessions |
 | **Roles & Permissions** | `/api/admin/roles`, `/api/admin/permissions`, `/api/admin/role-permissions` |
-| **LDAP** | CRUD `/api/admin/ldap`, auto-discover, import/export, test connection |
-| **AD Setup** | `GET /api/admin/setup-script` -- PowerShell script with hostname pre-injected |
-| **Kerberos** | `/api/admin/ldap/:id/setup-kerberos` -- setup, cleanup, status |
-| **Linux SSO** | `GET /api/admin/linux-setup-script` -- bash script for krb5 + browser config |
-| **Settings** | `GET/PUT /api/admin/settings` -- runtime configuration |
-| **Database** | Info, test, migrate, switch backends |
-| **Operations** | Backup, restore, audit log, restart |
+| **LDAP** | CRUD `/api/admin/ldap`, auto-discover, import/export, test |
+| **AD / Kerberos** | `GET /api/admin/setup-script`, `/api/admin/ldap/:id/setup-kerberos` |
+| **Linux SSO** | `GET /api/admin/linux-setup-script` |
+| **Settings / DB / Ops** | runtime settings, migrate/switch backends, backup, restore, audit, restart |
 
-See [docs/API.md](docs/API.md) for the complete reference with request/response examples.
+Full reference with request/response examples: [docs/API.md](docs/API.md).
 
-## Active Directory Setup
+</details>
 
-**2 clicks to full Kerberos SSO.**
-
-1. **Admin UI** -> LDAP Providers -> AD Setup Script. Enter a service account name. Download the PowerShell script.
-2. **Run the script** on any domain-joined machine (`.\Setup-SimpleAuth.ps1`). It creates the service account, registers SPNs, and exports a config file.
-3. **Import the config** back in the Admin UI. SimpleAuth generates the keytab in-memory, enables SSO immediately.
-
-No `ktpass`. No keytab files. No manual LDAP configuration. The script is fully interactive, idempotent, and handles cleanup.
-
-### Linux SSO
-
-The admin UI generates a bash script (`GET /api/admin/linux-setup-script`) that configures:
-- `krb5.conf` for your domain
-- Browser policies for Firefox, Chrome, Edge, Brave, Vivaldi, and Opera
-- Optional SSSD domain join
-
-## Client SDKs
-
-| Language | Package | Install |
-|----------|---------|---------|
-| **JavaScript/TypeScript** | `@simpleauth/js` | `npm install @simpleauth/js` |
-| **Go** | `github.com/bodaay/simpleauth-go` | `go get github.com/bodaay/simpleauth-go` |
-| **Python** | `simpleauth` | `pip install simpleauth` |
-| **.NET Core** | `SimpleAuth` | Reference the project |
-
-All SDKs include:
-- Login, refresh, and userinfo via direct API
-- Offline JWT verification with cached JWKS keys
-- Role and permission helpers (`HasRole`, `HasPermission`, `HasAnyRole`)
-- Framework middleware (Express, net/http, FastAPI/Flask/Django, ASP.NET Core)
-
-See [examples/](examples/) for integration code.
-
-## Embed in Go
-
-```go
-package main
-
-import (
-    "log"
-    "net/http"
-    "simpleauth/pkg/server"
-    "simpleauth/ui"
-)
-
-func main() {
-    cfg := server.Defaults()
-    cfg.Hostname = "myapp.example.com"
-    cfg.AdminKey = "my-secret-key"
-    cfg.DataDir = "./auth-data"
-    cfg.BasePath = "/auth"
-    cfg.TLSDisabled = true
-
-    sa, err := server.New(cfg, ui.FS())
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer sa.Close()
-
-    mux := http.NewServeMux()
-    mux.Handle("/auth/", http.StripPrefix("/auth", sa.Handler()))
-    mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-        w.Write([]byte("My app with built-in auth"))
-    })
-
-    log.Println("Running on :8080")
-    http.ListenAndServe(":8080", mux)
-}
-```
-
-`server.New(cfg, uiFS)` gives you programmatic control. Pass `nil` as config to load from env vars. Pass `nil` as UI to run API-only.
-
-### Bootstrap Pattern
-
-Use `POST /api/admin/bootstrap` on every startup to ensure your app's roles, permissions, and root user exist. It's idempotent -- safe to call repeatedly.
-
-```go
-// After server.New(), call bootstrap to ensure auth state
-bootstrapAuth(cfg.AdminKey, "http://localhost:8080/auth", os.Getenv("ROOT_PASSWORD"))
-```
-
-See the [full bootstrap example](docs/ARCHITECTURE.md) in the architecture docs.
-
-## Configuration
-
-Generate a config file with `./simpleauth init-config`. Environment variables always override config file values.
-
-### Essential Environment Variables
+<details>
+<summary><strong>Essential configuration</strong></summary>
 
 | Variable | Default | Description |
-|----------|---------|-------------|
+|---|---|---|
 | `AUTH_HOSTNAME` | OS hostname | FQDN for TLS cert and Kerberos SPN |
 | `AUTH_ADMIN_KEY` | auto-generated | Admin API key |
-| `AUTH_BASE_PATH` | `/sauth` | URL path prefix |
-| `AUTH_REDIRECT_URI` | | Allowed redirect URI (single) |
-| `AUTH_REDIRECT_URIS` | | Allowed redirect URIs (comma-separated) |
-| `AUTH_POSTGRES_URL` | | PostgreSQL URL (enables Postgres backend) |
-| `AUTH_TLS_DISABLED` | `false` | Disable TLS (for reverse proxy mode) |
+| `AUTH_BASE_PATH` | `/sauth` | URL path prefix (every URL starts here) |
+| `AUTH_REDIRECT_URIS` | | Allowed redirect URIs, comma-separated (`*` wildcards) |
+| `AUTH_CORS_ORIGINS` | | Browser origins allowed to call SimpleAuth |
+| `AUTH_POSTGRES_URL` | | Enables the Postgres backend |
+| `AUTH_TLS_DISABLED` | `false` | Disable TLS (reverse-proxy mode) |
 | `AUTH_TRUSTED_PROXIES` | | Trusted proxy CIDRs (default: trust none) |
+| `AUTH_CLIENT_SECRET` | | Enables confidential OIDC grants + introspection |
 | `AUTH_JWT_ACCESS_TTL` | `15m` | Access token lifetime |
-| `AUTH_JWT_REFRESH_TTL` | `720h` | Refresh token lifetime (30 days) |
-| `AUTH_CORS_ORIGINS` | | CORS origins (comma-separated or `*`) |
-| `AUTH_AUTO_SSO` | `false` | Auto-attempt Kerberos SSO on login page |
-| `AUTH_AUTO_SSO_DELAY` | `3` | Seconds before auto-SSO redirect (with cancel) |
-| `AUTH_ENABLE_SESSION_SSO` | `false` | Shared SSO session cookie — skip login page on subsequent app redirects |
-| `AUTH_SESSION_SSO_IDLE_TTL` | `8h` | Session idle timeout (bumped on every SimpleAuth hit) |
-| `AUTH_SESSION_SSO_MAX_TTL` | `720h` | Session absolute max lifetime (30 days) |
-| `AUTH_DATA_DIR` | `./data` | Data directory for DB, certs, keytabs |
-| `AUTH_DEPLOYMENT_NAME` | `sauth` | Deployment name (for service account naming) |
+| `AUTH_JWT_REFRESH_TTL` | `720h` | Refresh token lifetime |
+| `AUTH_ENABLE_SESSION_SSO` | `false` | Shared SSO session cookie across apps |
+| `AUTH_AUTO_SSO` | `false` | Auto-attempt Kerberos SSO on the login page |
 
-See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for all options including password policy, rate limiting, account lockout, and audit retention.
+Everything else — password policy, lockout, rate limiting, audit retention — is in [docs/CONFIGURATION.md](docs/CONFIGURATION.md). Behind nginx/Traefik/Caddy/HAProxy? See [docs/REVERSE-PROXY.md](docs/REVERSE-PROXY.md) (and mind the Kerberos header buffers).
 
-> **Note:** If neither `AUTH_REDIRECT_URI` nor `AUTH_REDIRECT_URIS` is set, all redirects are **rejected**.
+</details>
 
-### Reverse Proxy
+## 🪟 Active Directory in two clicks
 
-```bash
-AUTH_TLS_DISABLED=true
-AUTH_TRUSTED_PROXIES="172.16.0.0/12,10.0.0.0/8"
+1. **Admin UI → LDAP Providers → AD Setup Script.** Enter a service-account name, download the PowerShell script.
+2. **Run it** on any domain-joined machine — it creates the account, registers SPNs, and exports a config file. No `ktpass`.
+3. **Paste the config back** in the UI. SimpleAuth builds the keytab in memory and enables SSO immediately.
+
+Full guide + troubleshooting: [docs/ACTIVE-DIRECTORY.md](docs/ACTIVE-DIRECTORY.md).
+
+## 🧱 Embed it in your Go app
+
+```go
+cfg := server.Defaults()
+cfg.Hostname = "myapp.example.com"
+cfg.AdminKey = "my-secret-key"
+cfg.DataDir  = "./auth-data"
+cfg.BasePath = "/auth"
+
+sa, err := server.New(cfg, ui.FS())  // pass nil UI for API-only
+if err != nil { log.Fatal(err) }
+defer sa.Close()
+
+mux := http.NewServeMux()
+mux.Handle("/auth/", http.StripPrefix("/auth", sa.Handler()))
+// your app handles everything else
+http.ListenAndServe(":8080", mux)
 ```
 
-See [docs/REVERSE-PROXY.md](docs/REVERSE-PROXY.md) for nginx, Traefik, Caddy, and HAProxy examples.
+Your app and its auth server, one process, one deploy. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## Architecture
+## 📖 Documentation
 
-```
-simpleauth
-├── main.go                        # Entry point
-├── pkg/server/                    # Embeddable library
-├── internal/
-│   ├── config/                    # YAML + env config, auto TLS
-│   ├── store/
-│   │   ├── interface.go           # Storage interface
-│   │   ├── bolt.go                # BoltDB implementation
-│   │   ├── postgres.go            # PostgreSQL implementation
-│   │   └── migrate.go             # Backend migration
-│   ├── auth/
-│   │   ├── jwt.go                 # RSA keys, JWT, JWKS, OIDC tokens
-│   │   ├── ldap.go                # LDAP search, bind, attribute sync
-│   │   └── local.go               # Bcrypt password hashing
-│   └── handler/
-│       ├── auth.go                # Login, refresh, SSO, impersonation
-│       ├── oidc.go                # Standard OIDC provider endpoints
-│       ├── hosted_login.go        # Hosted login page
-│       ├── admin.go               # User CRUD, roles, backup/restore
-│       ├── admin_ldap.go          # LDAP management, AD setup
-│       ├── admin_kerberos.go      # Keytab generation, SPN management
-│       ├── admin_settings.go      # Runtime settings
-│       └── admin_linux_sso.go     # Linux SSO setup script
-├── sdk/                           # Official SDKs (JS, Go, Python, .NET)
-├── examples/                      # Integration examples
-├── docs/                          # Full documentation
-├── deploy/nginx/                  # Production nginx config
-└── ui/                            # Embedded Preact admin UI
-```
-
-## Documentation
-
-| Document | Description |
-|----------|-------------|
-| [Quick Start](docs/QUICKSTART.md) | Running in 5 minutes |
-| [API Reference](docs/API.md) | Every endpoint with examples |
+| Document | What's inside |
+|---|---|
+| [Quick Start](docs/QUICKSTART.md) | Zero to a logged-in user in 5 minutes |
+| [API Reference](docs/API.md) | Every endpoint, every term, with examples |
 | [Configuration](docs/CONFIGURATION.md) | All config options |
 | [Architecture](docs/ARCHITECTURE.md) | How it works under the hood |
-| [Active Directory](docs/ACTIVE-DIRECTORY.md) | AD setup, Kerberos, troubleshooting |
+| [Active Directory](docs/ACTIVE-DIRECTORY.md) | AD, Kerberos, troubleshooting |
 | [Reverse Proxy](docs/REVERSE-PROXY.md) | nginx, Traefik, Caddy, HAProxy |
 | [SDK Guide](docs/SDK-GUIDE.md) | Client SDK usage |
+| [Security Audit Log](SECURITY-AUDIT.md) | Every review, finding, and fix |
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE). Build something with it, and if it makes your auth simpler, ⭐ the repo so the next person finds it.

@@ -31,6 +31,13 @@ type Options struct {
 	AdminKey           string // Admin API key (for admin operations and bootstrap)
 	InsecureSkipVerify bool   // Allow self-signed TLS certificates
 
+	// AppID / AppSecret are an app's OAuth client credentials. When set, the
+	// app-management methods (AppBootstrap, GetAppAuthz, ...) authenticate to
+	// /api/app/* with HTTP Basic app_id:app_secret. Set Audience to AppID so
+	// Verify rejects tokens minted for other apps.
+	AppID     string
+	AppSecret string
+
 	// ExpectedIssuer, when non-empty, must equal the token's `iss` claim.
 	// Leave empty to skip the issuer check. NOTE: direct login/refresh tokens
 	// are issued with iss="simpleauth"; OIDC code-flow tokens use the realm URL.
@@ -53,16 +60,16 @@ type TokenResponse struct {
 
 // User represents the claims extracted from a verified JWT.
 type User struct {
-	Sub              string   `json:"sub"`
-	Name             string   `json:"name,omitempty"`
-	Email            string   `json:"email,omitempty"`
+	Sub               string   `json:"sub"`
+	Name              string   `json:"name,omitempty"`
+	Email             string   `json:"email,omitempty"`
 	PreferredUsername string   `json:"preferred_username,omitempty"`
-	Roles            []string `json:"roles,omitempty"`
-	Permissions      []string `json:"permissions,omitempty"`
-	Groups           []string `json:"groups,omitempty"`
-	Department       string   `json:"department,omitempty"`
-	Company          string   `json:"company,omitempty"`
-	JobTitle         string   `json:"job_title,omitempty"`
+	Roles             []string `json:"roles,omitempty"`
+	Permissions       []string `json:"permissions,omitempty"`
+	Groups            []string `json:"groups,omitempty"`
+	Department        string   `json:"department,omitempty"`
+	Company           string   `json:"company,omitempty"`
+	JobTitle          string   `json:"job_title,omitempty"`
 }
 
 // HasRole returns true if the user has the given role.
@@ -97,11 +104,11 @@ func (u *User) HasAnyRole(roles ...string) bool {
 
 // UserInfo holds the response from the OIDC userinfo endpoint.
 type UserInfo struct {
-	Sub              string `json:"sub"`
-	Name             string `json:"name,omitempty"`
-	Email            string `json:"email,omitempty"`
+	Sub               string `json:"sub"`
+	Name              string `json:"name,omitempty"`
+	Email             string `json:"email,omitempty"`
 	PreferredUsername string `json:"preferred_username,omitempty"`
-	EmailVerified    bool   `json:"email_verified,omitempty"`
+	EmailVerified     bool   `json:"email_verified,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -110,9 +117,11 @@ type UserInfo struct {
 
 // Client is the main entry point for interacting with SimpleAuth.
 type Client struct {
-	baseURL  string
-	adminKey string
-	http     *http.Client
+	baseURL   string
+	adminKey  string
+	appID     string
+	appSecret string
+	http      *http.Client
 
 	expectedIssuer string
 	audience       string
@@ -133,6 +142,8 @@ func New(opts Options) *Client {
 	return &Client{
 		baseURL:        strings.TrimRight(opts.URL, "/"),
 		adminKey:       opts.AdminKey,
+		appID:          opts.AppID,
+		appSecret:      opts.AppSecret,
 		http:           &http.Client{Transport: transport, Timeout: 30 * time.Second},
 		expectedIssuer: opts.ExpectedIssuer,
 		audience:       opts.Audience,
@@ -304,6 +315,240 @@ func (c *Client) GetUserPermissions(ctx context.Context, guid string) ([]string,
 // SetUserPermissions replaces the permissions for a user.
 func (c *Client) SetUserPermissions(ctx context.Context, guid string, perms []string) error {
 	_, err := c.adminRequest(ctx, http.MethodPut, fmt.Sprintf("/api/admin/users/%s/permissions", guid), perms)
+	return err
+}
+
+// ---------------------------------------------------------------------------
+// App self-management (v2 — per-app authorization)
+// ---------------------------------------------------------------------------
+//
+// An "app" is an OAuth client (app_id + app_secret) that self-manages its own
+// authorization under /api/app/*, authenticated with HTTP Basic app_id:app_secret.
+// The app_id is derived from the credential by the server — an app can only ever
+// read or write its own scope. Set Options.Audience to the app's audience/app_id
+// so Verify rejects tokens minted for other apps.
+
+// AppAuthz is an app's complete authorization: its roles, permissions, the
+// role -> permission map, and the user/group -> role assignments. It is the
+// shape of GET/PUT /api/app/authz.
+type AppAuthz struct {
+	AppID            string              `json:"app_id"`
+	Roles            []string            `json:"roles,omitempty"`
+	Permissions      []string            `json:"permissions,omitempty"`
+	RolePermissions  map[string][]string `json:"role_permissions,omitempty"`
+	UserAssignments  map[string][]string `json:"user_assignments,omitempty"`  // user ref (guid/sAMAccountName/username) -> roles
+	GroupAssignments map[string][]string `json:"group_assignments,omitempty"` // group identifier -> roles
+}
+
+// Assignment grants a set of roles to either a directory user or an AD group.
+// Set exactly one of User (a username/sAMAccountName/GUID) or Group (the group's
+// identifier, sAMAccountName by default).
+type Assignment struct {
+	User  string   `json:"user,omitempty"`
+	Group string   `json:"group,omitempty"`
+	Roles []string `json:"roles"`
+}
+
+// BootstrapSpec is idempotent authz-as-code for the calling app: it declares the
+// app's roles, permissions, role -> permission map, and assignments. It is the
+// body of POST /api/app/bootstrap and is safe to call on every deploy.
+type BootstrapSpec struct {
+	Roles           []string            `json:"roles,omitempty"`
+	Permissions     []string            `json:"permissions,omitempty"`
+	RolePermissions map[string][]string `json:"role_permissions,omitempty"`
+	Assignments     []Assignment        `json:"assignments,omitempty"`
+}
+
+// BootstrapResult is the response from POST /api/app/bootstrap.
+type BootstrapResult struct {
+	Status           string `json:"status"`
+	AppID            string `json:"app_id"`
+	RolesCount       int    `json:"roles_count"`
+	AssignmentsCount int    `json:"assignments_count"`
+}
+
+// AppSettings is an app's own settings (no secret), the shape of
+// GET /api/app/settings.
+type AppSettings struct {
+	AppID             string   `json:"app_id"`
+	Name              string   `json:"name"`
+	Audience          string   `json:"audience"`
+	RedirectURIs      []string `json:"redirect_uris"`
+	CORSOrigins       []string `json:"cors_origins"`
+	RequireAssignment bool     `json:"require_assignment"`
+	AllowLocalUsers   bool     `json:"allow_local_users"`
+	Disabled          bool     `json:"disabled"`
+	CreatedAt         string   `json:"created_at"`
+}
+
+// LocalUser is an app-local user (a user owned by one app, e.g. a customer
+// portal account not in the directory). Returned by ListLocalUsers and (with
+// just the GUID/username populated) CreateLocalUser.
+type LocalUser struct {
+	GUID        string `json:"guid"`
+	Username    string `json:"username,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
+	Email       string `json:"email,omitempty"`
+	OwnerAppID  string `json:"owner_app_id,omitempty"`
+	Disabled    bool   `json:"disabled,omitempty"`
+	CreatedAt   string `json:"created_at,omitempty"`
+}
+
+// appRequest performs an authenticated request against /api/app/*. It mirrors
+// adminRequest but authenticates with HTTP Basic app_id:app_secret instead of a
+// Bearer admin key. It returns a clear error if AppID/AppSecret are unset.
+func (c *Client) appRequest(ctx context.Context, method, path string, payload interface{}) ([]byte, error) {
+	if c.appID == "" || c.appSecret == "" {
+		return nil, errors.New("simpleauth: AppID and AppSecret are required for app-management operations")
+	}
+
+	var bodyReader io.Reader
+	if payload != nil {
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return nil, fmt.Errorf("simpleauth: marshal payload: %w", err)
+		}
+		bodyReader = strings.NewReader(string(data))
+	}
+
+	u := fmt.Sprintf("%s%s", c.baseURL, path)
+	req, err := http.NewRequestWithContext(ctx, method, u, bodyReader)
+	if err != nil {
+		return nil, fmt.Errorf("simpleauth: create request: %w", err)
+	}
+	req.SetBasicAuth(c.appID, c.appSecret)
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("simpleauth: app request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("simpleauth: app endpoint returned %d: %s", resp.StatusCode, string(body))
+	}
+	return body, nil
+}
+
+// AppBootstrap declares the calling app's roles, permissions, role->permission
+// map, and assignments (authz-as-code). It is idempotent and safe to call on
+// every deploy. POST /api/app/bootstrap.
+func (c *Client) AppBootstrap(ctx context.Context, spec BootstrapSpec) (*BootstrapResult, error) {
+	body, err := c.appRequest(ctx, http.MethodPost, "/api/app/bootstrap", spec)
+	if err != nil {
+		return nil, err
+	}
+	var res BootstrapResult
+	if err := json.Unmarshal(body, &res); err != nil {
+		return nil, fmt.Errorf("simpleauth: decode bootstrap result: %w", err)
+	}
+	return &res, nil
+}
+
+// GetAppAuthz returns the calling app's current authorization (roles,
+// permissions, role->permission map, and assignments). GET /api/app/authz.
+func (c *Client) GetAppAuthz(ctx context.Context) (*AppAuthz, error) {
+	body, err := c.appRequest(ctx, http.MethodGet, "/api/app/authz", nil)
+	if err != nil {
+		return nil, err
+	}
+	var authz AppAuthz
+	if err := json.Unmarshal(body, &authz); err != nil {
+		return nil, fmt.Errorf("simpleauth: decode authz: %w", err)
+	}
+	return &authz, nil
+}
+
+// SetAppAuthz replaces the calling app's authorization wholesale. The server
+// uses the credential's app_id authoritatively, so AppAuthz.AppID may be left
+// empty. PUT /api/app/authz.
+func (c *Client) SetAppAuthz(ctx context.Context, authz AppAuthz) (*AppAuthz, error) {
+	body, err := c.appRequest(ctx, http.MethodPut, "/api/app/authz", authz)
+	if err != nil {
+		return nil, err
+	}
+	var updated AppAuthz
+	if err := json.Unmarshal(body, &updated); err != nil {
+		return nil, fmt.Errorf("simpleauth: decode authz: %w", err)
+	}
+	return &updated, nil
+}
+
+// AppSettings returns the calling app's own settings (no secret).
+// GET /api/app/settings.
+func (c *Client) AppSettings(ctx context.Context) (*AppSettings, error) {
+	body, err := c.appRequest(ctx, http.MethodGet, "/api/app/settings", nil)
+	if err != nil {
+		return nil, err
+	}
+	var s AppSettings
+	if err := json.Unmarshal(body, &s); err != nil {
+		return nil, fmt.Errorf("simpleauth: decode settings: %w", err)
+	}
+	return &s, nil
+}
+
+// CreateLocalUser provisions an app-local user owned by the calling app. It
+// requires the app's allow_local_users flag. roles, if non-empty, are recorded
+// as the app's assignment for that username. displayName and email are optional
+// (pass ""). POST /api/app/users.
+func (c *Client) CreateLocalUser(ctx context.Context, username, password, displayName, email string, roles []string) (*LocalUser, error) {
+	payload := map[string]interface{}{
+		"username": username,
+		"password": password,
+	}
+	if displayName != "" {
+		payload["display_name"] = displayName
+	}
+	if email != "" {
+		payload["email"] = email
+	}
+	if len(roles) > 0 {
+		payload["roles"] = roles
+	}
+	body, err := c.appRequest(ctx, http.MethodPost, "/api/app/users", payload)
+	if err != nil {
+		return nil, err
+	}
+	var u LocalUser
+	if err := json.Unmarshal(body, &u); err != nil {
+		return nil, fmt.Errorf("simpleauth: decode local user: %w", err)
+	}
+	return &u, nil
+}
+
+// ListLocalUsers lists the calling app's local users. GET /api/app/users.
+func (c *Client) ListLocalUsers(ctx context.Context) ([]LocalUser, error) {
+	body, err := c.appRequest(ctx, http.MethodGet, "/api/app/users", nil)
+	if err != nil {
+		return nil, err
+	}
+	var wrapper struct {
+		Users []LocalUser `json:"users"`
+	}
+	if err := json.Unmarshal(body, &wrapper); err != nil {
+		return nil, fmt.Errorf("simpleauth: decode local users: %w", err)
+	}
+	return wrapper.Users, nil
+}
+
+// DeleteLocalUser deletes an app-local user owned by the calling app.
+// DELETE /api/app/users/{guid}.
+func (c *Client) DeleteLocalUser(ctx context.Context, guid string) error {
+	_, err := c.appRequest(ctx, http.MethodDelete, fmt.Sprintf("/api/app/users/%s", guid), nil)
+	return err
+}
+
+// SetLocalUserPassword resets an app-local user's password.
+// PUT /api/app/users/{guid}/password.
+func (c *Client) SetLocalUserPassword(ctx context.Context, guid, password string) error {
+	_, err := c.appRequest(ctx, http.MethodPut, fmt.Sprintf("/api/app/users/%s/password", guid), map[string]string{
+		"password": password,
+	})
 	return err
 }
 
