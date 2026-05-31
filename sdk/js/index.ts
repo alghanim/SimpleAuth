@@ -355,7 +355,7 @@ async function verifyRS256(
       false,
       ['verify'],
     );
-    return globalThis.crypto.subtle.verify('RSASSA-PKCS1-v1_5', cryptoKey, signature, data);
+    return globalThis.crypto.subtle.verify('RSASSA-PKCS1-v1_5', cryptoKey, signature as BufferSource, data as BufferSource);
   }
 
   // Fallback: Node.js crypto module

@@ -1,10 +1,9 @@
 # =============================================================================
 # SimpleAuth — SDK build & test (Go, Python, JavaScript/TS, .NET)
 # =============================================================================
-# Each SDK is its own job so one failing doesn't mask the others. Go and Python
-# are validated and gating. JavaScript and .NET are wired but marked best-effort
-# (continue-on-error) until they're green — remove continue-on-error on each once
-# it passes, to make them gating too.
+# Each SDK is its own job so one failing doesn't mask the others. Go, Python, and
+# JS/TS are validated and gating. .NET is gating too (sources compile against
+# net8.0 with the AspNetCore framework reference); CI runs its first real build.
 # =============================================================================
 
 name: SDKs
@@ -52,9 +51,8 @@ jobs:
         run: python -c "import simpleauth; print('simpleauth', getattr(simpleauth, '__version__', 'ok'))"
 
   js-sdk:
-    name: JS/TS SDK (best-effort)
+    name: JS/TS SDK
     runs-on: ubuntu-latest
-    continue-on-error: true # not yet CI-validated (no tsconfig.json); remove once green
     defaults:
       run:
         working-directory: sdk/js
@@ -64,15 +62,12 @@ jobs:
         with:
           node-version: "20"
       - run: npm install
-      - name: Ensure TypeScript
-        run: npm install --no-save typescript
       - name: Type-check
-        run: npx tsc --noEmit
+        run: npm run typecheck
 
   dotnet-sdk:
-    name: .NET SDK (best-effort)
+    name: .NET SDK
     runs-on: ubuntu-latest
-    continue-on-error: true # not yet CI-validated; remove once green
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
