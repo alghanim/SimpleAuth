@@ -11,6 +11,11 @@ import (
 // ctxAppID carries the authenticated app's id for /api/app/* handlers.
 const ctxAppID contextKey = "app_id"
 
+// dummyAppSecretHash is a valid bcrypt hash compared against when an app_id is
+// unknown or secret-less, so the credential check runs in the same time as for a
+// real app with a wrong secret — closing the app_id enumeration timing oracle (L5).
+var dummyAppSecretHash, _ = auth.HashPassword("simpleauth-app-credential-placeholder")
+
 // requireApp authenticates the calling app (HTTP Basic app_id:app_secret, or a
 // Bearer app-management token) and scopes the request to that app — the app_id
 // is derived from the credential and put in context, never read from the path,
@@ -40,8 +45,15 @@ func (h *Handler) requireApp(next http.HandlerFunc) http.HandlerFunc {
 // Bearer app-management token. Returns (app_id, ok).
 func (h *Handler) authenticateApp(r *http.Request) (string, bool) {
 	if appID, secret, ok := r.BasicAuth(); ok && appID != "" {
-		if app, err := h.store.GetApp(appID); err == nil && !app.Disabled &&
-			app.SecretHash != "" && auth.CheckPassword(app.SecretHash, secret) {
+		app, err := h.store.GetApp(appID)
+		// Always run exactly one bcrypt comparison (against a dummy hash when the app
+		// is unknown/secret-less) so timing doesn't reveal whether the app_id exists (L5).
+		hash := dummyAppSecretHash
+		if err == nil && app.SecretHash != "" {
+			hash = app.SecretHash
+		}
+		secretOK := auth.CheckPassword(hash, secret)
+		if err == nil && !app.Disabled && app.SecretHash != "" && secretOK {
 			return appID, true
 		}
 		return "", false
@@ -82,7 +94,14 @@ func (h *Handler) handleAppToken(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	app, err := h.store.GetApp(appID)
-	if err != nil || app.Disabled || app.SecretHash == "" || !auth.CheckPassword(app.SecretHash, secret) {
+	// Always run exactly one bcrypt comparison (dummy hash when unknown/secret-less)
+	// so an unknown app_id is indistinguishable from a wrong secret by timing (L5).
+	hash := dummyAppSecretHash
+	if err == nil && app.SecretHash != "" {
+		hash = app.SecretHash
+	}
+	secretOK := auth.CheckPassword(hash, secret)
+	if err != nil || app.Disabled || app.SecretHash == "" || !secretOK {
 		w.Header().Set("WWW-Authenticate", `Basic realm="simpleauth-app"`)
 		jsonError(w, "invalid app credentials", http.StatusUnauthorized)
 		return

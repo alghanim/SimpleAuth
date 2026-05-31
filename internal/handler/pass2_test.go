@@ -79,6 +79,31 @@ func TestH5_RefreshKeepsPerAppScope(t *testing.T) {
 	}
 }
 
+// TestL5_AppCredentialAuthOutcomes covers Audit Pass 2 / L5: the constant-time app
+// credential check still returns the right outcomes (unknown app, wrong secret, and
+// correct secret) — the dummy-hash path must not change behavior.
+func TestL5_AppCredentialAuthOutcomes(t *testing.T) {
+	h, _ := testSetup(t)
+	adm := adminHeaders()
+	w := doJSON(h, "POST", "/api/admin/apps", map[string]interface{}{"app_id": "known", "audience": "known"}, adm)
+	var app map[string]interface{}
+	parseJSON(t, w, &app)
+	secret := app["app_secret"].(string)
+
+	// unknown app_id -> 401 (and no panic from the dummy-hash branch)
+	if w := doJSON(h, "POST", "/api/app/token", nil, basicAuth("does-not-exist", "whatever")); w.Code != http.StatusUnauthorized {
+		t.Fatalf("unknown app_id must be 401, got %d", w.Code)
+	}
+	// known app, wrong secret -> 401
+	if w := doJSON(h, "POST", "/api/app/token", nil, basicAuth("known", "wrong")); w.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong secret must be 401, got %d", w.Code)
+	}
+	// known app, correct secret -> 200
+	if w := doJSON(h, "POST", "/api/app/token", nil, basicAuth("known", secret)); w.Code != http.StatusOK {
+		t.Fatalf("correct secret must be 200, got %d %s", w.Code, w.Body.String())
+	}
+}
+
 // TestL4_RotateSecretRevokesMgmtTokens covers Audit Pass 2 / L4: rotating an app's
 // secret must invalidate management tokens minted before the rotation.
 func TestL4_RotateSecretRevokesMgmtTokens(t *testing.T) {
