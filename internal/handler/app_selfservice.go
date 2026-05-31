@@ -17,6 +17,15 @@ const ctxAppID contextKey = "app_id"
 // so an app can only ever act on its own scope (v2 M4).
 func (h *Handler) requireApp(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Throttle app_secret (HTTP Basic) attempts to brake brute-force. A Bearer
+		// management token is signed and not a guessing vector, so token-based API
+		// calls are not rate-limited (M16).
+		if _, _, basic := r.BasicAuth(); basic {
+			if !h.loginLimiter.allow(getClientIP(r)) {
+				jsonError(w, "too many requests", http.StatusTooManyRequests)
+				return
+			}
+		}
 		appID, ok := h.authenticateApp(r)
 		if !ok {
 			w.Header().Set("WWW-Authenticate", `Basic realm="simpleauth-app"`)
@@ -55,6 +64,10 @@ func appIDFromContext(r *http.Request) string {
 // token (usable as a Bearer on /api/app/*). Accepts HTTP Basic or form fields.
 // POST /api/app/token
 func (h *Handler) handleAppToken(w http.ResponseWriter, r *http.Request) {
+	if !h.loginLimiter.allow(getClientIP(r)) {
+		jsonError(w, "too many requests", http.StatusTooManyRequests)
+		return
+	}
 	_ = r.ParseForm()
 	appID := r.FormValue("app_id")
 	secret := r.FormValue("app_secret")

@@ -68,7 +68,7 @@ source of truth for what is currently open vs. fixed.
 | M13 | Group list never cleared when a user leaves all directory groups (stale roles) | MEDIUM | FIXED | 2026-05-31 (branch `v2`) |
 | M14 | Deleting an app-local user leaves a dangling mapping (username unprovisionable) | MEDIUM | FIXED | 2026-05-31 (branch `v2`) |
 | M15 | App-local provisioning + reset bypass the password policy | MEDIUM | FIXED | 2026-05-31 (branch `v2`) |
-| M16 | No rate-limit on `/api/app/token` + `/api/app/*` Basic auth (app_secret brute-force) | MEDIUM | OPEN | — (v2 branch, pre-release) |
+| M16 | No rate-limit on `/api/app/token` + `/api/app/*` Basic auth (app_secret brute-force) | MEDIUM | FIXED | 2026-05-31 (branch `v2`) |
 | L1 | `/login/sso` validates `redirect_uri` against the global, not per-app, allowlist | LOW | OPEN | — (v2 branch, pre-release) |
 | L2 | `handleImpersonate` mints an `aud`-less token carrying global roles | LOW | OPEN | — (v2 branch, pre-release) |
 | L3 | App-local user creation TOCTOU (store enforces no username uniqueness) | LOW | FIXED | 2026-05-31 (branch `v2`) |

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"simpleauth/internal/auth"
 	"simpleauth/internal/store"
@@ -75,6 +76,27 @@ func TestH5_RefreshKeepsPerAppScope(t *testing.T) {
 	}, adm)
 	if w := doJSON(h, "POST", "/api/auth/refresh", map[string]interface{}{"refresh_token": rt["refresh_token"].(string)}, nil); w.Code != http.StatusForbidden {
 		t.Fatalf("refresh after de-assignment must be denied, got %d %s", w.Code, w.Body.String())
+	}
+}
+
+// TestM16_AppCredentialRateLimit covers Audit Pass 2 / M16: the app_secret surface
+// (token exchange + Basic auth) must be rate-limited to brake brute-force.
+func TestM16_AppCredentialRateLimit(t *testing.T) {
+	h, _ := testSetup(t)
+	h.loginLimiter = newRateLimiter(3, time.Minute)
+	adm := adminHeaders()
+	doJSON(h, "POST", "/api/admin/apps", map[string]interface{}{"app_id": "rl", "audience": "rl"}, adm)
+
+	got429 := false
+	for i := 0; i < 8; i++ {
+		w := doJSON(h, "POST", "/api/app/token", nil, basicAuth("rl", "wrong-secret"))
+		if w.Code == http.StatusTooManyRequests {
+			got429 = true
+			break
+		}
+	}
+	if !got429 {
+		t.Fatal("app_secret brute-force on /api/app/token must be rate-limited (M16)")
 	}
 }
 
