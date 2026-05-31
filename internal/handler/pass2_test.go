@@ -79,6 +79,37 @@ func TestH5_RefreshKeepsPerAppScope(t *testing.T) {
 	}
 }
 
+// TestL2_ImpersonationTokenIsScoped covers Audit Pass 2 / L2: impersonation tokens
+// must carry an audience (default app when unspecified) and be scopable to a named
+// app, rather than being aud-less with global roles.
+func TestL2_ImpersonationTokenIsScoped(t *testing.T) {
+	h, _ := testSetup(t)
+	adm := adminHeaders()
+	w := doJSON(h, "POST", "/api/admin/users", map[string]interface{}{"display_name": "Target", "password": "tpass1234"}, adm)
+	var u map[string]interface{}
+	parseJSON(t, w, &u)
+	guid := u["guid"].(string)
+
+	// default: token carries the default app's audience (test-client), not aud-less
+	w = doJSON(h, "POST", "/api/auth/impersonate", map[string]interface{}{"target_guid": guid}, adm)
+	if w.Code != http.StatusOK {
+		t.Fatalf("impersonate: %d %s", w.Code, w.Body.String())
+	}
+	var tok map[string]interface{}
+	parseJSON(t, w, &tok)
+	if auds := tokenAudiences(t, tok["access_token"].(string)); len(auds) == 0 {
+		t.Fatal("impersonation token must carry an audience (L2)")
+	}
+
+	// scoped to a named app
+	doJSON(h, "POST", "/api/admin/apps", map[string]interface{}{"app_id": "scoped", "audience": "scoped"}, adm)
+	w = doJSON(h, "POST", "/api/auth/impersonate", map[string]interface{}{"target_guid": guid, "app_id": "scoped"}, adm)
+	parseJSON(t, w, &tok)
+	if auds := tokenAudiences(t, tok["access_token"].(string)); !hasAud(auds, "scoped") {
+		t.Fatalf("impersonation token should be scoped to the named app, got %v", auds)
+	}
+}
+
 // TestL1_SSORedirectUsesPerAppAllowlist covers Audit Pass 2 / L1: /login/sso must
 // validate redirect_uri against the resolved app's own allowlist, not the global one.
 func TestL1_SSORedirectUsesPerAppAllowlist(t *testing.T) {

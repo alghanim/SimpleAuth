@@ -658,6 +658,7 @@ func (h *Handler) handleUserInfo(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleImpersonate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		TargetGUID string `json:"target_guid"`
+		AppID      string `json:"app_id"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
@@ -674,8 +675,16 @@ func (h *Handler) handleImpersonate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	roles, _ := h.store.GetUserRoles(target.GUID)
-	perms := h.resolveUserPermissions(target.GUID, roles)
+	// Scope the impersonation token to an app so it carries an audience and the
+	// target's per-app roles, instead of an aud-less token with global roles that
+	// validates anywhere aud is not checked (L2). app_id is optional — absent means
+	// the default app (whose authz falls back to the global roles, as before).
+	app, err := h.resolveApp(req.AppID)
+	if err != nil {
+		jsonError(w, "unknown app", http.StatusBadRequest)
+		return
+	}
+	roles, perms, _ := h.resolveTokenRoles(app, target)
 
 	// Get admin GUID from the Authorization header (it's the master key, so we use "admin")
 	adminActor := "admin"
@@ -695,6 +704,7 @@ func (h *Handler) handleImpersonate(w http.ResponseWriter, r *http.Request) {
 		ImpersonatedBy:    adminActor,
 	}
 	claims.Subject = target.GUID
+	claims.Audience = []string{appAudience(app)}
 
 	accessToken, err := h.jwt.IssueAccessToken(claims, h.cfg.ImpersonateTTL)
 	if err != nil {
