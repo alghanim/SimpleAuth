@@ -71,6 +71,35 @@ func TestH5_RefreshKeepsPerAppScope(t *testing.T) {
 	}
 }
 
+// TestM14_DeleteLocalUserFreesUsername covers Audit Pass 2 / M14: deleting an
+// app-local user must remove its identity mapping so the username can be
+// re-provisioned (previously the dangling mapping made create 409 forever).
+func TestM14_DeleteLocalUserFreesUsername(t *testing.T) {
+	h, _ := testSetup(t)
+	adm := adminHeaders()
+
+	w := doJSON(h, "POST", "/api/admin/apps", map[string]interface{}{
+		"app_id": "desk", "audience": "desk", "allow_local_users": true,
+	}, adm)
+	var app map[string]interface{}
+	parseJSON(t, w, &app)
+	secret := app["app_secret"].(string)
+	cred := basicAuth("desk", secret)
+
+	w = doJSON(h, "POST", "/api/app/users", map[string]interface{}{"username": "agent1", "password": "deskpass1"}, cred)
+	var u map[string]interface{}
+	parseJSON(t, w, &u)
+	guid := u["guid"].(string)
+
+	if w := doJSON(h, "DELETE", "/api/app/users/"+guid, nil, cred); w.Code != http.StatusOK {
+		t.Fatalf("delete local user: %d %s", w.Code, w.Body.String())
+	}
+	// the same username must be re-provisionable (was 409 forever)
+	if w := doJSON(h, "POST", "/api/app/users", map[string]interface{}{"username": "agent1", "password": "deskpass2"}, cred); w.Code != http.StatusCreated {
+		t.Fatalf("re-provision after delete should succeed, got %d %s", w.Code, w.Body.String())
+	}
+}
+
 // TestH8_DeleteAppPurgesLocalUsers covers Audit Pass 2 / H8: deleting an app must
 // remove its app-local users + their identity mappings, so re-registering the same
 // app_id cannot resurrect the old accounts (or their passwords) under a new owner.

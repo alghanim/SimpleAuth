@@ -266,9 +266,25 @@ func (h *Handler) handleDeleteLocalUser(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, "user not found", http.StatusNotFound)
 		return
 	}
+	mapKey := "applocal:" + appID
+	mappings, _ := h.store.GetMappingsForUser(guid)
 	if err := h.store.DeleteUser(guid); err != nil {
 		jsonError(w, "failed to delete user", http.StatusInternalServerError)
 		return
+	}
+	// Drop the user's identity mapping(s) so the username frees up for
+	// re-provisioning (otherwise the dangling mapping made create return 409
+	// forever) and the stale per-app role assignment doesn't outlive the user (M14).
+	for _, m := range mappings {
+		_ = h.store.DeleteIdentityMapping(m.Provider, m.ExternalID)
+		if m.Provider == mapKey {
+			if authz, err := h.store.GetAppAuthz(appID); err == nil && authz.UserAssignments != nil {
+				if _, ok := authz.UserAssignments[m.ExternalID]; ok {
+					delete(authz.UserAssignments, m.ExternalID)
+					_ = h.store.SaveAppAuthz(authz)
+				}
+			}
+		}
 	}
 	h.audit("app_local_user_deleted", appID, getClientIP(r), map[string]interface{}{"app_id": appID, "guid": guid})
 	jsonResp(w, map[string]string{"status": "deleted"}, http.StatusOK)
