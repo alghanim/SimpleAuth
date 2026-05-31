@@ -458,9 +458,11 @@ func (h *Handler) handleOIDCTokenAuthCode(w http.ResponseWriter, r *http.Request
 }
 
 func (h *Handler) handleOIDCTokenPassword(w http.ResponseWriter, r *http.Request) {
-	// Resource Owner Password Credentials is a confidential grant — requires a
-	// client secret, disabled by default (C2).
-	if err := h.requireConfidentialClient(r); err != nil {
+	// Resource Owner Password Credentials is a confidential grant — the app
+	// authenticates with its own app_secret (the default client falls back to
+	// AUTH_CLIENT_SECRET), and the resulting token is scoped to that app (C2 + M11).
+	app, err := h.authenticateConfidentialClient(r)
+	if err != nil {
 		oidcError(w, "invalid_client", err.Error(), http.StatusUnauthorized)
 		return
 	}
@@ -471,12 +473,6 @@ func (h *Handler) handleOIDCTokenPassword(w http.ResponseWriter, r *http.Request
 
 	if username == "" || password == "" {
 		oidcError(w, "invalid_request", "username and password required", http.StatusBadRequest)
-		return
-	}
-
-	app, err := h.resolveApp(r.FormValue("client_id"))
-	if err != nil {
-		oidcError(w, "invalid_client", "unknown client", http.StatusBadRequest)
 		return
 	}
 
@@ -514,17 +510,57 @@ func (h *Handler) handleOIDCTokenPassword(w http.ResponseWriter, r *http.Request
 	h.issueOIDCTokens(w, r, user, scope, "", app)
 }
 
-func (h *Handler) handleOIDCTokenClientCredentials(w http.ResponseWriter, r *http.Request) {
-	// client_credentials is a confidential grant — requires a client secret,
-	// disabled by default so anonymous callers can't mint signed tokens (C2).
-	if err := h.requireConfidentialClient(r); err != nil {
-		oidcError(w, "invalid_client", err.Error(), http.StatusUnauthorized)
-		return
+// presentedClientSecret extracts the client secret from client_secret_post or
+// HTTP Basic.
+func presentedClientSecret(r *http.Request) string {
+	if s := r.FormValue("client_secret"); s != "" {
+		return s
 	}
+	if _, pw, ok := r.BasicAuth(); ok {
+		return pw
+	}
+	return ""
+}
 
+// authenticateConfidentialClient authenticates a confidential grant
+// (client_credentials / password) and returns the app the resulting token must be
+// scoped to. A registered app authenticates against ITS OWN app_secret, so a caller
+// can only mint a token for the audience whose secret it actually holds — the single
+// global secret no longer impersonates every app (M11). The secret-less default
+// client falls back to the global AUTH_CLIENT_SECRET for v1 back-compat (disabled
+// when unset).
+func (h *Handler) authenticateConfidentialClient(r *http.Request) (*store.App, error) {
 	app, err := h.resolveApp(r.FormValue("client_id"))
 	if err != nil {
-		oidcError(w, "invalid_client", "unknown client", http.StatusBadRequest)
+		return nil, fmt.Errorf("unknown client")
+	}
+	presented := presentedClientSecret(r)
+	if presented == "" {
+		return nil, fmt.Errorf("invalid client credentials")
+	}
+	if app.SecretHash != "" {
+		if !auth.CheckPassword(app.SecretHash, presented) {
+			return nil, fmt.Errorf("invalid client credentials")
+		}
+		return app, nil
+	}
+	if !h.oidcConfidentialEnabled() {
+		return nil, fmt.Errorf("grant disabled: set a client secret (AUTH_CLIENT_SECRET) to enable confidential grants")
+	}
+	if !timingSafeEqual(presented, h.cfg.ClientSecret) {
+		return nil, fmt.Errorf("invalid client credentials")
+	}
+	return app, nil
+}
+
+func (h *Handler) handleOIDCTokenClientCredentials(w http.ResponseWriter, r *http.Request) {
+	// client_credentials is a confidential grant — the app authenticates with its
+	// own app_secret (the default client falls back to AUTH_CLIENT_SECRET), so the
+	// minted token is scoped only to an audience the caller can authenticate for
+	// (C2 + M11).
+	app, err := h.authenticateConfidentialClient(r)
+	if err != nil {
+		oidcError(w, "invalid_client", err.Error(), http.StatusUnauthorized)
 		return
 	}
 

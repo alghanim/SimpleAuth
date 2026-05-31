@@ -2,6 +2,9 @@ package handler
 
 import (
 	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -69,6 +72,55 @@ func TestH5_RefreshKeepsPerAppScope(t *testing.T) {
 	}, adm)
 	if w := doJSON(h, "POST", "/api/auth/refresh", map[string]interface{}{"refresh_token": rt["refresh_token"].(string)}, nil); w.Code != http.StatusForbidden {
 		t.Fatalf("refresh after de-assignment must be denied, got %d %s", w.Code, w.Body.String())
+	}
+}
+
+// TestM11_ConfidentialGrantUsesPerAppSecret covers Audit Pass 2 / M11: a
+// confidential grant (client_credentials) must authenticate against the named app's
+// OWN secret, so neither another app's secret nor the global secret can mint a token
+// scoped to an app the caller can't authenticate for.
+func TestM11_ConfidentialGrantUsesPerAppSecret(t *testing.T) {
+	h, _ := testSetup(t)
+	adm := adminHeaders()
+	tokenURL := "/realms/test-issuer/protocol/openid-connect/token"
+
+	mk := func(id string) string {
+		w := doJSON(h, "POST", "/api/admin/apps", map[string]interface{}{"app_id": id, "audience": id}, adm)
+		var a map[string]interface{}
+		parseJSON(t, w, &a)
+		return a["app_secret"].(string)
+	}
+	secretA := mk("svca")
+	secretB := mk("svcb")
+
+	doForm := func(form url.Values) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", tokenURL, strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w
+	}
+	cc := func(clientID, secret string) *httptest.ResponseRecorder {
+		return doForm(url.Values{"grant_type": {"client_credentials"}, "client_id": {clientID}, "client_secret": {secret}})
+	}
+
+	// correct per-app secret -> 200, aud=svca
+	w := cc("svca", secretA)
+	if w.Code != http.StatusOK {
+		t.Fatalf("client_credentials with svca's own secret: %d %s", w.Code, w.Body.String())
+	}
+	var tok map[string]interface{}
+	parseJSON(t, w, &tok)
+	if auds := tokenAudiences(t, tok["access_token"].(string)); !hasAud(auds, "svca") {
+		t.Fatalf("aud should be svca, got %v", auds)
+	}
+	// app B's secret must NOT mint a token scoped to app A
+	if w := cc("svca", secretB); w.Code == http.StatusOK {
+		t.Fatal("app B's secret must not mint a token for app A (M11)")
+	}
+	// the global secret must NOT mint a token for a named app
+	if w := cc("svca", "test-secret"); w.Code == http.StatusOK {
+		t.Fatal("the global secret must not mint a token for a named app (M11)")
 	}
 }
 
