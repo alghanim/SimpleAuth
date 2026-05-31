@@ -2,6 +2,7 @@ package handler
 
 import (
 	"net/http"
+	"sync"
 	"testing"
 )
 
@@ -68,6 +69,52 @@ func TestH5_RefreshKeepsPerAppScope(t *testing.T) {
 	}, adm)
 	if w := doJSON(h, "POST", "/api/auth/refresh", map[string]interface{}{"refresh_token": rt["refresh_token"].(string)}, nil); w.Code != http.StatusForbidden {
 		t.Fatalf("refresh after de-assignment must be denied, got %d %s", w.Code, w.Body.String())
+	}
+}
+
+// TestL3_ConcurrentLocalUserCreateIsAtomic covers Audit Pass 2 / L3: concurrent
+// creates of the same app-local username must produce exactly one user, not race
+// past the existence check and orphan duplicates.
+func TestL3_ConcurrentLocalUserCreateIsAtomic(t *testing.T) {
+	h, _ := testSetup(t)
+	adm := adminHeaders()
+	w := doJSON(h, "POST", "/api/admin/apps", map[string]interface{}{
+		"app_id": "race", "audience": "race", "allow_local_users": true,
+	}, adm)
+	var app map[string]interface{}
+	parseJSON(t, w, &app)
+	cred := basicAuth("race", app["app_secret"].(string))
+
+	const n = 8
+	codes := make(chan int, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			w := doJSON(h, "POST", "/api/app/users", map[string]interface{}{"username": "dup", "password": "racepass1"}, cred)
+			codes <- w.Code
+		}()
+	}
+	wg.Wait()
+	close(codes)
+	created := 0
+	for c := range codes {
+		if c == http.StatusCreated {
+			created++
+		}
+	}
+	if created != 1 {
+		t.Fatalf("exactly one concurrent create should succeed, got %d", created)
+	}
+	// confirm the store holds exactly one such user
+	w = doJSON(h, "GET", "/api/app/users", nil, cred)
+	var list struct {
+		Users []map[string]interface{} `json:"users"`
+	}
+	parseJSON(t, w, &list)
+	if len(list.Users) != 1 {
+		t.Fatalf("want 1 provisioned user, got %d", len(list.Users))
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"simpleauth/internal/auth"
@@ -30,6 +31,9 @@ type Handler struct {
 	// the LDAP bind password). Loaded from <data_dir>/secret.key. May be nil if
 	// the key could not be loaded; legacy plaintext still reads in that case.
 	secretKey []byte
+	// localUserMu serializes app-local user provisioning so the existence check
+	// and the create+mapping are atomic (L3).
+	localUserMu sync.Mutex
 }
 
 func New(cfg *config.Config, s store.Store, jwtMgr *auth.JWTManager, uiFS fs.FS, version string) *Handler {

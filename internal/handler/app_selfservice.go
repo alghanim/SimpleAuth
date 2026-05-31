@@ -202,6 +202,11 @@ func (h *Handler) handleCreateLocalUser(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	mapKey := "applocal:" + appID
+	// Serialize the existence check and the create+mapping so two concurrent
+	// creates of the same username can't both pass the check and have the second
+	// overwrite the first's mapping, orphaning a fully-provisioned user (L3).
+	h.localUserMu.Lock()
+	defer h.localUserMu.Unlock()
 	if existing, err := h.store.ResolveMapping(mapKey, req.Username); err == nil && existing != "" {
 		jsonError(w, "username already exists for this app", http.StatusConflict)
 		return

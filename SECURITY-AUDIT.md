@@ -71,7 +71,7 @@ source of truth for what is currently open vs. fixed.
 | M16 | No rate-limit on `/api/app/token` + `/api/app/*` Basic auth (app_secret brute-force) | MEDIUM | OPEN | — (v2 branch, pre-release) |
 | L1 | `/login/sso` validates `redirect_uri` against the global, not per-app, allowlist | LOW | OPEN | — (v2 branch, pre-release) |
 | L2 | `handleImpersonate` mints an `aud`-less token carrying global roles | LOW | OPEN | — (v2 branch, pre-release) |
-| L3 | App-local user creation TOCTOU (store enforces no username uniqueness) | LOW | OPEN | — (v2 branch, pre-release) |
+| L3 | App-local user creation TOCTOU (store enforces no username uniqueness) | LOW | FIXED | 2026-05-31 (branch `v2`) |
 | L4 | `rotate-secret` does not revoke outstanding app-management tokens | LOW | OPEN | — (v2 branch, pre-release) |
 | L5 | App-id enumeration via bcrypt timing oracle | LOW | OPEN | — (v2 branch, pre-release) |
 | I3 | Group-derived roles inherently stale on refresh (no directory re-read) | INFO | OPEN | — (v2 branch, pre-release) |
