@@ -1,0 +1,42 @@
+# =============================================================================
+# SimpleAuth — Security: dependency vulnerability scanning
+# =============================================================================
+# Runs govulncheck (the official Go vulnerability scanner) against the server
+# and the Go SDK. SimpleAuth is an auth server, so a known-vulnerable dependency
+# is a security bug — this gate is intentionally blocking. Also runs weekly so a
+# newly-disclosed CVE in a pinned dependency surfaces even without a code change.
+# =============================================================================
+
+name: Security
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Scan server module
+        run: govulncheck ./...
+
+      - name: Scan Go SDK module
+        working-directory: sdk/go
+        run: govulncheck ./...

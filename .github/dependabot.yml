@@ -1,0 +1,51 @@
+# =============================================================================
+# SimpleAuth — Dependabot: automated dependency + Action updates
+# =============================================================================
+# Keeps the server, all four SDKs, and the GitHub Actions themselves patched.
+# Security updates matter most here — this is an auth server.
+# =============================================================================
+
+version: 2
+updates:
+  # Server Go module
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    labels: ["dependencies", "go"]
+
+  # Go SDK module
+  - package-ecosystem: gomod
+    directory: "/sdk/go"
+    schedule:
+      interval: weekly
+    labels: ["dependencies", "sdk", "go"]
+
+  # GitHub Actions
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    labels: ["dependencies", "ci"]
+
+  # JavaScript/TypeScript SDK
+  - package-ecosystem: npm
+    directory: "/sdk/js"
+    schedule:
+      interval: weekly
+    labels: ["dependencies", "sdk", "javascript"]
+
+  # Python SDK
+  - package-ecosystem: pip
+    directory: "/sdk/python"
+    schedule:
+      interval: weekly
+    labels: ["dependencies", "sdk", "python"]
+
+  # .NET SDK
+  - package-ecosystem: nuget
+    directory: "/sdk/dotnet"
+    schedule:
+      interval: weekly
+    labels: ["dependencies", "sdk", "dotnet"]

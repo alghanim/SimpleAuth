@@ -30,11 +30,17 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
+      - name: go vet
+        run: go vet ./...
+
       - name: Build
         run: make build
 
       - name: Test
         run: make test
+
+      - name: Test (race detector)
+        run: go test -race ./...
 
   docker:
     name: Docker Build
