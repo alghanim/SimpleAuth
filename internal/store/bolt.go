@@ -122,6 +122,41 @@ func (s *BoltStore) UpdateApp(a *App) error {
 
 func (s *BoltStore) DeleteApp(appID string) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
+		// Cascade: delete the app's app-local users and every identity mapping they
+		// own, so re-registering the same app_id cannot resurrect ghost accounts
+		// (and their password hashes) under a new owner (H8). Collect first —
+		// BoltDB forbids mutating a bucket mid-ForEach.
+		var localGUIDs []string
+		if err := tx.Bucket(bucketUsers).ForEach(func(k, v []byte) error {
+			var u User
+			if err := json.Unmarshal(v, &u); err != nil {
+				return nil
+			}
+			if u.OwnerAppID == appID {
+				localGUIDs = append(localGUIDs, u.GUID)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		for _, guid := range localGUIDs {
+			if err := tx.Bucket(bucketUsers).Delete([]byte(guid)); err != nil {
+				return err
+			}
+			if data := tx.Bucket(bucketIdxMappingsByGUID).Get([]byte(guid)); data != nil {
+				var mappings []IdentityMapping
+				if json.Unmarshal(data, &mappings) == nil {
+					for _, m := range mappings {
+						if err := tx.Bucket(bucketIdentityMappings).Delete(mappingKey(m.Provider, m.ExternalID)); err != nil {
+							return err
+						}
+					}
+				}
+				if err := tx.Bucket(bucketIdxMappingsByGUID).Delete([]byte(guid)); err != nil {
+					return err
+				}
+			}
+		}
 		if err := tx.Bucket(bucketApps).Delete([]byte(appID)); err != nil {
 			return err
 		}

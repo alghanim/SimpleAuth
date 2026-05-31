@@ -178,12 +178,28 @@ func (s *PostgresStore) UpdateApp(a *App) error {
 }
 
 func (s *PostgresStore) DeleteApp(appID string) error {
-	if _, err := s.db.Exec(`DELETE FROM sa_apps WHERE app_id = $1`, appID); err != nil {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// Cascade: delete the app's app-local users and their identity mappings so a
+	// reused app_id cannot resurrect ghost accounts under a new owner (H8).
+	if _, err := tx.Exec(
+		`DELETE FROM sa_identity_mappings WHERE user_guid IN (SELECT guid FROM sa_users WHERE data->>'owner_app_id' = $1)`, appID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM sa_users WHERE data->>'owner_app_id' = $1`, appID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM sa_apps WHERE app_id = $1`, appID); err != nil {
 		return err
 	}
 	// Cascade: drop the app's authorization data too.
-	_, err := s.db.Exec(`DELETE FROM sa_app_authz WHERE app_id = $1`, appID)
-	return err
+	if _, err := tx.Exec(`DELETE FROM sa_app_authz WHERE app_id = $1`, appID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *PostgresStore) GetAppAuthz(appID string) (*AppAuthz, error) {

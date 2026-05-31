@@ -71,6 +71,53 @@ func TestH5_RefreshKeepsPerAppScope(t *testing.T) {
 	}
 }
 
+// TestH8_DeleteAppPurgesLocalUsers covers Audit Pass 2 / H8: deleting an app must
+// remove its app-local users + their identity mappings, so re-registering the same
+// app_id cannot resurrect the old accounts (or their passwords) under a new owner.
+func TestH8_DeleteAppPurgesLocalUsers(t *testing.T) {
+	h, s := testSetup(t)
+	adm := adminHeaders()
+
+	mkApp := func() string {
+		w := doJSON(h, "POST", "/api/admin/apps", map[string]interface{}{
+			"app_id": "tenant", "audience": "tenant", "allow_local_users": true,
+		}, adm)
+		if w.Code != http.StatusCreated {
+			t.Fatalf("create app: %d %s", w.Code, w.Body.String())
+		}
+		var app map[string]interface{}
+		parseJSON(t, w, &app)
+		return app["app_secret"].(string)
+	}
+
+	secret := mkApp()
+	if w := doJSON(h, "POST", "/api/app/users", map[string]interface{}{"username": "ghost", "password": "ghostpass1"}, basicAuth("tenant", secret)); w.Code != http.StatusCreated {
+		t.Fatalf("provision: %d %s", w.Code, w.Body.String())
+	}
+
+	// delete the app
+	if w := doJSON(h, "DELETE", "/api/admin/apps/tenant", nil, adm); w.Code != http.StatusOK && w.Code != http.StatusNoContent {
+		t.Fatalf("delete app: %d %s", w.Code, w.Body.String())
+	}
+	// the app-local user + its applocal mapping must be gone
+	if _, err := s.ResolveMapping("applocal:tenant", "ghost"); err == nil {
+		t.Fatal("applocal mapping survived app deletion (H8 resurrection risk)")
+	}
+
+	// re-register the same app_id under a (notionally) new owner; the old account
+	// must NOT authenticate
+	secret2 := mkApp()
+	if w := doJSON(h, "POST", "/api/auth/login", map[string]interface{}{
+		"username": "ghost", "password": "ghostpass1", "app_id": "tenant",
+	}, nil); w.Code == http.StatusOK {
+		t.Fatal("resurrected app-local user authenticated at the reused app_id (H8)")
+	}
+	// and the new owner can cleanly re-provision the same username
+	if w := doJSON(h, "POST", "/api/app/users", map[string]interface{}{"username": "ghost", "password": "newpass12"}, basicAuth("tenant", secret2)); w.Code != http.StatusCreated {
+		t.Fatalf("re-provision after reuse should succeed, got %d %s", w.Code, w.Body.String())
+	}
+}
+
 // TestH7_MgmtTokenIsNotAUserToken covers Audit Pass 2 / H7: an app-management
 // token must not validate at user-resource boundaries, even when the app_id is
 // chosen to collide with a victim's user GUID (the worst case — direct profile read).
