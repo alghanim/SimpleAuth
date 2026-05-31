@@ -79,6 +79,35 @@ func TestH5_RefreshKeepsPerAppScope(t *testing.T) {
 	}
 }
 
+// TestL4_RotateSecretRevokesMgmtTokens covers Audit Pass 2 / L4: rotating an app's
+// secret must invalidate management tokens minted before the rotation.
+func TestL4_RotateSecretRevokesMgmtTokens(t *testing.T) {
+	h, _ := testSetup(t)
+	adm := adminHeaders()
+	w := doJSON(h, "POST", "/api/admin/apps", map[string]interface{}{"app_id": "rot", "audience": "rot"}, adm)
+	var app map[string]interface{}
+	parseJSON(t, w, &app)
+	secret1 := app["app_secret"].(string)
+
+	// mint a management token under the current secret
+	w = doJSON(h, "POST", "/api/app/token", nil, basicAuth("rot", secret1))
+	var mt map[string]interface{}
+	parseJSON(t, w, &mt)
+	mgmt := map[string]string{"Authorization": "Bearer " + mt["access_token"].(string)}
+	if w := doJSON(h, "GET", "/api/app/authz", nil, mgmt); w.Code != http.StatusOK {
+		t.Fatalf("mgmt token should work before rotation, got %d", w.Code)
+	}
+
+	// rotate the secret
+	if w := doJSON(h, "POST", "/api/admin/apps/rot/rotate-secret", nil, adm); w.Code != http.StatusOK {
+		t.Fatalf("rotate: %d %s", w.Code, w.Body.String())
+	}
+	// the pre-rotation management token is now rejected
+	if w := doJSON(h, "GET", "/api/app/authz", nil, mgmt); w.Code != http.StatusUnauthorized {
+		t.Fatalf("mgmt token minted before rotation must be revoked, got %d", w.Code)
+	}
+}
+
 // TestL2_ImpersonationTokenIsScoped covers Audit Pass 2 / L2: impersonation tokens
 // must carry an audience (default app when unspecified) and be scopable to a named
 // app, rather than being aud-less with global roles.

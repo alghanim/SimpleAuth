@@ -85,6 +85,9 @@ type App struct {
 	AllowLocalUsers   bool      `json:"allow_local_users"`
 	Disabled          bool      `json:"disabled,omitempty"`
 	CreatedAt         time.Time `json:"created_at"`
+	// SecretRotatedAt is set when the app secret is rotated; app-management tokens
+	// issued before this instant are rejected so rotation revokes them (L4).
+	SecretRotatedAt time.Time `json:"secret_rotated_at,omitempty"`
 }
 
 type IdentityMapping struct {

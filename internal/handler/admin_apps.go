@@ -223,6 +223,7 @@ func (h *Handler) handleRotateAppSecret(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	a.SecretHash = hash
+	a.SecretRotatedAt = time.Now().UTC() // revokes management tokens issued earlier (L4)
 	if err := h.store.UpdateApp(a); err != nil {
 		jsonError(w, "failed to rotate secret", http.StatusInternalServerError)
 		return

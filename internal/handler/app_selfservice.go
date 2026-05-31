@@ -49,6 +49,11 @@ func (h *Handler) authenticateApp(r *http.Request) (string, bool) {
 	if tok := extractBearerToken(r); tok != "" {
 		if claims, err := h.jwt.ValidateToken(tok); err == nil && claims.Typ == "app-mgmt" && claims.Azp != "" {
 			if app, err := h.store.GetApp(claims.Azp); err == nil && !app.Disabled {
+				// Reject management tokens minted before the last secret rotation, so
+				// rotating a leaked secret actually revokes outstanding tokens (L4).
+				if !app.SecretRotatedAt.IsZero() && (claims.IssuedAt == nil || claims.IssuedAt.Time.Before(app.SecretRotatedAt)) {
+					return "", false
+				}
 				return claims.Azp, true
 			}
 		}

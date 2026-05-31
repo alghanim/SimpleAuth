@@ -72,7 +72,7 @@ source of truth for what is currently open vs. fixed.
 | L1 | `/login/sso` validates `redirect_uri` against the global, not per-app, allowlist | LOW | FIXED | 2026-05-31 (branch `v2`) |
 | L2 | `handleImpersonate` mints an `aud`-less token carrying global roles | LOW | FIXED | 2026-05-31 (branch `v2`) |
 | L3 | App-local user creation TOCTOU (store enforces no username uniqueness) | LOW | FIXED | 2026-05-31 (branch `v2`) |
-| L4 | `rotate-secret` does not revoke outstanding app-management tokens | LOW | OPEN | — (v2 branch, pre-release) |
+| L4 | `rotate-secret` does not revoke outstanding app-management tokens | LOW | FIXED | 2026-05-31 (branch `v2`) |
 | L5 | App-id enumeration via bcrypt timing oracle | LOW | OPEN | — (v2 branch, pre-release) |
 | I3 | Group-derived roles inherently stale on refresh (no directory re-read) | INFO | OPEN | — (v2 branch, pre-release) |
 
