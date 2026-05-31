@@ -46,6 +46,7 @@ docker run -d -p 8080:8080 \
 - 🌐 **A standard OIDC provider** — discovery, authorization-code flow with **PKCE**, token, userinfo, JWKS, introspection, end-session. Works with any OIDC client library, in any language.
 - 🔑 **RS256 JWTs** — auto-generated RSA-2048 keys, a JWKS endpoint for offline verification, single-use **refresh-token rotation** with family replay detection.
 - 👥 **Roles, permissions & groups** — resolved into the token your app already trusts.
+- 🏢 **One directory, many apps** — register multiple apps that each own their *own* roles, permissions, and allowed users. Users sign in once; tokens are **audience-scoped**, so a token minted for app A is rejected by app B. ([details below](#one-login-many-apps))
 
 **It's simple.** The kind of simple you feel in the first five minutes:
 
@@ -64,6 +65,7 @@ docker run -d -p 8080:8080 \
 | **External deps** | Database + cache required | Windows infra | **None** (optional Postgres) |
 | **Kerberos SSO** | Manual, fiddly | Built-in but rigid | **Two-click auto-config** |
 | **OIDC provider** | Full | Claims-based | **Full** |
+| **Per-app authorization** | Realms + clients (heavy) | Relying-party trusts | **Built-in, audience-scoped** |
 | **Admin experience** | Steep | Windows-only MMC | **One web page** |
 | **REST API** | Sprawling | None | **Clean JSON + JWTs** |
 
@@ -129,6 +131,22 @@ Then verify tokens **offline** against the JWKS endpoint (no network call per re
 
 Every SDK does login/refresh/userinfo, **offline JWT verification with cached JWKS**, role/permission helpers (`HasRole`, `HasPermission`, `HasAnyRole`), and ships middleware for Express, `net/http`, FastAPI/Flask/Django, and ASP.NET Core. See [examples/](examples/).
 
+<a id="one-login-many-apps"></a>
+
+## 🏢 One login, many apps — each with its own authorization
+
+Most auth servers make you choose: one shared login *or* per-app control. SimpleAuth gives you both — **one directory, one sign-in, but every app owns its own authorization.**
+
+- **Register an app** → it gets an `app_id` + `app_secret`. The root admin adds apps; existing single-app deployments auto-migrate to a default app, unchanged.
+- **Tokens are audience-scoped.** Every token carries `aud` = the app it was minted for, so a token for `billing` is **rejected** by `analytics` — the SDK's `audience` option enforces it. No more one-token-rules-them-all.
+- **Each app owns its roles, permissions, and assignments.** `viewer` in one app is unrelated to `viewer` in another. Flip on `require_assignment` and an app admits only the users it has explicitly assigned.
+- **Apps manage themselves.** An app configures its *own* roles and assignments using its `app_id`/`app_secret` (HTTP Basic or a short-lived management token) and an idempotent `POST /api/app/bootstrap` you can run on every deploy — no master admin key in your pipeline.
+- **App-local users.** An app can own users who aren't in your directory at all — perfect for a customer portal — scoped to that app and never shared across apps.
+
+A developer's whole integration becomes: get an `app_id`/`app_secret` → `bootstrap` your roles on deploy → point the SDK at SimpleAuth with `audience` set → `verify()`. All four SDKs ship the app-management helpers (`appBootstrap`, `getAppAuthz`/`setAppAuthz`, app-local user CRUD) — see the `app-integration` examples in [examples/](examples/) and the Apps reference in [docs/API.md](docs/API.md).
+
+> Think Azure AD / Entra app registrations — one directory, many apps, per-app roles, audience-scoped tokens — without the cluster.
+
 ## 🧰 What's in the box
 
 <table>
@@ -151,6 +169,8 @@ Every SDK does login/refresh/userinfo, **offline JWT verification with cached JW
 - JWKS endpoint for offline verification
 - Refresh-token rotation + family replay detection + revocation
 - Roles, permissions, and role→permission mapping
+- **Per-app authorization** — audience-scoped tokens, per-app roles & assignment
+- **App self-service** + app-local users (apps own their own scope)
 - Default roles auto-assigned on first login
 - AD/LDAP groups surfaced in the token
 
