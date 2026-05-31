@@ -733,6 +733,14 @@ func (h *Handler) validateAccessToken(tokenStr string) (*auth.Claims, error) {
 	if err != nil {
 		return nil, err
 	}
+	// App-management tokens (minted by /api/app/token, typ="app-mgmt") are NOT user
+	// access tokens. They are accepted only by authenticateApp for the /api/app/*
+	// surface; reject them at every user-resource boundary so a management
+	// credential cannot read user profiles via userinfo/introspection or act as a
+	// user — including the case where an app_id collides with a user GUID (H7).
+	if claims.Typ == "app-mgmt" {
+		return nil, fmt.Errorf("not a user access token")
+	}
 	// Check user-level revocation (admin revoked all sessions)
 	if revoked, _ := h.store.IsUserAccessRevoked(claims.Subject); revoked {
 		return nil, fmt.Errorf("access revoked")

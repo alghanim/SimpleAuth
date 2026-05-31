@@ -71,6 +71,50 @@ func TestH5_RefreshKeepsPerAppScope(t *testing.T) {
 	}
 }
 
+// TestH7_MgmtTokenIsNotAUserToken covers Audit Pass 2 / H7: an app-management
+// token must not validate at user-resource boundaries, even when the app_id is
+// chosen to collide with a victim's user GUID (the worst case — direct profile read).
+func TestH7_MgmtTokenIsNotAUserToken(t *testing.T) {
+	h, _ := testSetup(t)
+	adm := adminHeaders()
+
+	// a victim directory user
+	w := doJSON(h, "POST", "/api/admin/users", map[string]interface{}{
+		"display_name": "Victim Secret Name", "password": "victimpass1",
+	}, adm)
+	var victim map[string]interface{}
+	parseJSON(t, w, &victim)
+	guid := victim["guid"].(string) // a UUID, which is a valid app_id slug
+
+	// an app whose id == the victim's GUID, so a mgmt token's sub == victim GUID
+	w = doJSON(h, "POST", "/api/admin/apps", map[string]interface{}{"app_id": guid, "audience": "x"}, adm)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create colliding app: %d %s", w.Code, w.Body.String())
+	}
+	var app map[string]interface{}
+	parseJSON(t, w, &app)
+	secret := app["app_secret"].(string)
+
+	// mint the management token
+	w = doJSON(h, "POST", "/api/app/token", nil, basicAuth(guid, secret))
+	if w.Code != http.StatusOK {
+		t.Fatalf("mint mgmt token: %d %s", w.Code, w.Body.String())
+	}
+	var mt map[string]interface{}
+	parseJSON(t, w, &mt)
+	mgmt := mt["access_token"].(string)
+
+	// it must be rejected as a user token at userinfo (not return the victim profile)
+	w = doJSON(h, "GET", "/api/auth/userinfo", nil, map[string]string{"Authorization": "Bearer " + mgmt})
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("mgmt token must be rejected at userinfo, got %d %s", w.Code, w.Body.String())
+	}
+	// it still works for its real purpose (app self-service)
+	if w := doJSON(h, "GET", "/api/app/authz", nil, map[string]string{"Authorization": "Bearer " + mgmt}); w.Code != http.StatusOK {
+		t.Fatalf("mgmt token should still authorize /api/app/*, got %d %s", w.Code, w.Body.String())
+	}
+}
+
 // TestM10_DisabledAppStopsRefresh covers Audit Pass 2 / M10: refreshing a token
 // whose app has been disabled/deleted must return a clean error, not mint a token
 // (the disable kill switch) and not nil-deref/500 in resolveTokenRoles.
