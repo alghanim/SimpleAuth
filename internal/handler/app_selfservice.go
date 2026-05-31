@@ -201,6 +201,12 @@ func (h *Handler) handleCreateLocalUser(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, "username and password required", http.StatusBadRequest)
 		return
 	}
+	// App-local passwords authenticate through the normal login flow, so they must
+	// meet the same password policy as every other write path (M15).
+	if err := auth.ValidatePassword(req.Password, h.passwordPolicy()); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	mapKey := "applocal:" + appID
 	// Serialize the existence check and the create+mapping so two concurrent
 	// creates of the same username can't both pass the check and have the second
@@ -310,6 +316,10 @@ func (h *Handler) handleSetLocalUserPassword(w http.ResponseWriter, r *http.Requ
 	}
 	if err := readJSON(r, &req); err != nil || req.Password == "" {
 		jsonError(w, "password required", http.StatusBadRequest)
+		return
+	}
+	if err := auth.ValidatePassword(req.Password, h.passwordPolicy()); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	hash, err := auth.HashPassword(req.Password)

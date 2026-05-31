@@ -78,6 +78,36 @@ func TestH5_RefreshKeepsPerAppScope(t *testing.T) {
 	}
 }
 
+// TestM15_AppLocalPasswordPolicy covers Audit Pass 2 / M15: app-local provisioning
+// and password reset must enforce the configured password policy.
+func TestM15_AppLocalPasswordPolicy(t *testing.T) {
+	h, _ := testSetup(t)
+	h.cfg.PasswordMinLength = 10
+	adm := adminHeaders()
+	w := doJSON(h, "POST", "/api/admin/apps", map[string]interface{}{
+		"app_id": "pol", "audience": "pol", "allow_local_users": true,
+	}, adm)
+	var app map[string]interface{}
+	parseJSON(t, w, &app)
+	cred := basicAuth("pol", app["app_secret"].(string))
+
+	// weak password rejected on create
+	if w := doJSON(h, "POST", "/api/app/users", map[string]interface{}{"username": "weak", "password": "short"}, cred); w.Code != http.StatusBadRequest {
+		t.Fatalf("weak app-local password must be rejected, got %d %s", w.Code, w.Body.String())
+	}
+	// compliant password accepted
+	w = doJSON(h, "POST", "/api/app/users", map[string]interface{}{"username": "weak", "password": "longenough1"}, cred)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("compliant password should be accepted, got %d %s", w.Code, w.Body.String())
+	}
+	var u map[string]interface{}
+	parseJSON(t, w, &u)
+	// weak password rejected on reset too
+	if w := doJSON(h, "PUT", "/api/app/users/"+u["guid"].(string)+"/password", map[string]interface{}{"password": "x"}, cred); w.Code != http.StatusBadRequest {
+		t.Fatalf("weak reset password must be rejected, got %d %s", w.Code, w.Body.String())
+	}
+}
+
 // TestM13_EmptyGroupsClearStaleGroups covers Audit Pass 2 / M13: an LDAP re-sync
 // that returns no groups (user removed from all groups) must clear the cached
 // groups, not leave the stale set that keeps awarding group-derived roles.
