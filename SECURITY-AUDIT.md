@@ -64,7 +64,7 @@ source of truth for what is currently open vs. fixed.
 | H8 | `DeleteApp` orphans app-local users → cross-tenant resurrection on app_id reuse | HIGH | FIXED | 2026-05-31 (branch `v2`) |
 | M10 | OIDC refresh nil-derefs on disabled/deleted app; refresh skips app-disable | MEDIUM | FIXED | 2026-05-31 (branch `v2`) |
 | M11 | OIDC `client_credentials`/`password` use the global secret but mint any app's `aud` | MEDIUM | FIXED | 2026-05-31 (branch `v2`) |
-| M12 | Kerberos auto-provision binding hijack via app-set `email`/`display_name` | MEDIUM | OPEN | — (v2 branch, pre-release) |
+| M12 | Kerberos auto-provision binding hijack via app-set `email`/`display_name` | MEDIUM | FIXED | 2026-05-31 (branch `v2`) |
 | M13 | Group list never cleared when a user leaves all directory groups (stale roles) | MEDIUM | OPEN | — (v2 branch, pre-release) |
 | M14 | Deleting an app-local user leaves a dangling mapping (username unprovisionable) | MEDIUM | FIXED | 2026-05-31 (branch `v2`) |
 | M15 | App-local provisioning + reset bypass the password policy | MEDIUM | OPEN | — (v2 branch, pre-release) |

@@ -135,6 +135,23 @@ func (h *Handler) resolveTokenRoles(app *store.App, user *store.User) (roles, pe
 	return roles, perms, false
 }
 
+// matchAutoProvisionUser finds a directory user whose display name or email equals
+// a verified Kerberos principal's username, for first-login auto-provisioning.
+// App-local users (OwnerAppID set) are excluded: their display_name/email are
+// attacker-controlled (set via /api/app/users), so a match must never bind a
+// directory principal to an app-owned account (M12).
+func matchAutoProvisionUser(users []*store.User, username string) string {
+	for _, u := range users {
+		if u.OwnerAppID != "" {
+			continue
+		}
+		if u.DisplayName == username || u.Email == username {
+			return u.GUID
+		}
+	}
+	return ""
+}
+
 func sortedKeys(m map[string]struct{}) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {

@@ -897,15 +897,12 @@ func (h *Handler) handleNegotiate(w http.ResponseWriter, r *http.Request) {
 		userGUID, err = h.store.ResolveMapping("kerberos", username)
 	}
 	if err != nil {
-		// Auto-provision: look for a user with matching display name
+		// Auto-provision: look for a directory user with matching display name/email.
 		users, _ := h.store.ListUsers()
-		for _, u := range users {
-			if u.DisplayName == username || u.Email == username {
-				userGUID = u.GUID
-				// Create identity mapping for next time
-				h.store.SetIdentityMapping("kerberos", cname, userGUID)
-				break
-			}
+		if guid := matchAutoProvisionUser(users, username); guid != "" {
+			userGUID = guid
+			// Create identity mapping for next time
+			h.store.SetIdentityMapping("kerberos", cname, userGUID)
 		}
 		if userGUID == "" {
 			h.audit("negotiate_failed", "", ip, map[string]interface{}{

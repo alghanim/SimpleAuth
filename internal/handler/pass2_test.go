@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"simpleauth/internal/store"
 )
 
 // TestH5_RefreshKeepsPerAppScope covers Audit Pass 2 / H5: refreshing an
@@ -72,6 +74,25 @@ func TestH5_RefreshKeepsPerAppScope(t *testing.T) {
 	}, adm)
 	if w := doJSON(h, "POST", "/api/auth/refresh", map[string]interface{}{"refresh_token": rt["refresh_token"].(string)}, nil); w.Code != http.StatusForbidden {
 		t.Fatalf("refresh after de-assignment must be denied, got %d %s", w.Code, w.Body.String())
+	}
+}
+
+// TestM12_AutoProvisionSkipsAppLocalUsers covers Audit Pass 2 / M12: Kerberos
+// first-login auto-provisioning must not bind a verified directory principal to an
+// app-local user whose (attacker-controlled) email/display_name happens to match.
+func TestM12_AutoProvisionSkipsAppLocalUsers(t *testing.T) {
+	users := []*store.User{
+		{GUID: "app-owned", OwnerAppID: "shop", Email: "alice@corp"},
+		{GUID: "dir-user", DisplayName: "alice@corp"},
+	}
+	// an app-local user must never be chosen, even if listed first
+	if guid := matchAutoProvisionUser(users, "alice@corp"); guid != "dir-user" {
+		t.Fatalf("auto-provision must pick the directory user, got %q", guid)
+	}
+	// with ONLY an app-local match, there is no binding at all
+	onlyLocal := []*store.User{{GUID: "app-owned", OwnerAppID: "shop", Email: "bob@corp"}}
+	if guid := matchAutoProvisionUser(onlyLocal, "bob@corp"); guid != "" {
+		t.Fatalf("app-local match must not bind a principal, got %q", guid)
 	}
 }
 
