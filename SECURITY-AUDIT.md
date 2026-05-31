@@ -74,7 +74,7 @@ source of truth for what is currently open vs. fixed.
 | L3 | App-local user creation TOCTOU (store enforces no username uniqueness) | LOW | FIXED | 2026-05-31 (branch `v2`) |
 | L4 | `rotate-secret` does not revoke outstanding app-management tokens | LOW | FIXED | 2026-05-31 (branch `v2`) |
 | L5 | App-id enumeration via bcrypt timing oracle | LOW | FIXED | 2026-05-31 (branch `v2`) |
-| I3 | Group-derived roles inherently stale on refresh (no directory re-read) | INFO | OPEN | — (v2 branch, pre-release) |
+| I3 | Group-derived roles inherently stale on refresh (no directory re-read) | INFO | WONTFIX | by design — see Pass 2 remediation note |
 
 ---
 
@@ -619,4 +619,57 @@ note rather than a code bug — short access-token TTLs bound the staleness wind
    `2.0.0` notes).
 5. **M12, M13, M15, M16** — provisioning + sync + rate-limit hardening.
 6. **L1, L2, L4, L5, I3** — lower-impact hardening + operator docs.
+
+---
+
+## Remediation Log — Audit Pass 2 (2026-05-31, Claude Opus 4.8)
+
+All 16 code findings (H5–H8, M10–M16, L1–L5) are **FIXED** on branch `v2`, one
+commit per finding, each with a regression test in
+`internal/handler/pass2_test.go` (plus store-layer coverage for H8). I3 is
+**WONTFIX** (design note, below). `go build`, `go vet`, and the full test suite are
+green.
+
+| ID | Files | Approach |
+|----|-------|----------|
+| H5 | `internal/handler/auth.go` | `handleRefresh` re-resolves the app from the stored refresh row and uses `resolveTokenRoles` (per-app roles + `require_assignment`) instead of global roles; rejects a disabled/deleted app. |
+| H6 | `internal/handler/apps.go` | `resolveTokenRoles` evaluates `require_assignment` **before** the v1 global-roles fallback, so an app with the flag on but no assignments fails closed. |
+| H7 | `internal/handler/auth.go` | `validateAccessToken` rejects `typ=="app-mgmt"`, so management tokens can't act as user tokens at userinfo/introspection/reset-password. |
+| H8 | `internal/store/{bolt,postgres}.go` | `DeleteApp` cascades app-local users + their `applocal:` identity mappings inside one transaction. |
+| M10 | `internal/handler/oidc.go` (+ H5 for auth.go) | OIDC refresh resolves the app and returns `invalid_grant` on a disabled/deleted app instead of nil-dereferencing. |
+| M11 | `internal/handler/oidc.go` | New `authenticateConfidentialClient`: named apps authenticate against their own `SecretHash` for `client_credentials`/`password`; the secret-less default client falls back to `AUTH_CLIENT_SECRET`. |
+| M12 | `internal/handler/{auth,apps}.go` | Kerberos auto-provision (`matchAutoProvisionUser`) skips `OwnerAppID!=""` users. |
+| M13 | `internal/handler/auth.go` | `syncUserFromLDAP` always reconciles `user.Groups` to the bind result, clearing stale groups when the user is in none. |
+| M14 | `internal/handler/app_selfservice.go` | `handleDeleteLocalUser` deletes the user's identity mappings + stale per-app assignment. |
+| M15 | `internal/handler/app_selfservice.go` | App-local create + password reset call `auth.ValidatePassword(…, h.passwordPolicy())`. |
+| M16 | `internal/handler/app_selfservice.go` | `/api/app/token` and Basic-auth `/api/app/*` go through the per-IP login limiter; Bearer mgmt-token calls are exempt. |
+| L1 | `internal/handler/auth.go` | `/login/sso` resolves the app up front and validates `redirect_uri` via `appAllowsRedirect`. |
+| L2 | `internal/handler/auth.go` | `handleImpersonate` scopes the token to an app (optional `app_id`, default app otherwise), stamping `aud` + per-app roles. |
+| L4 | `internal/store/types.go`, `internal/handler/{admin_apps,app_selfservice}.go` | `App.SecretRotatedAt` stamped on rotate; `authenticateApp` rejects mgmt tokens with `iat` before it. |
+| L5 | `internal/handler/app_selfservice.go` | App credential check always runs one bcrypt compare (dummy hash when unknown/secret-less). |
+
+### Operator notes (behavior changes shipped in this pass — for the `2.0.0` release)
+- **`require_assignment` now denies by default (H6).** An app with
+  `require_assignment: true` and no assignments will reject all directory users until
+  you assign them. (Previously it silently admitted everyone with their global roles.)
+- **Refreshed tokens carry per-app roles, not global roles (H5).** A user's effective
+  app roles are re-evaluated on every refresh, including `require_assignment`
+  de-assignment.
+- **Confidential grants need the per-app secret (M11).** `client_credentials` and
+  `password` for a **named** app must present that app's `app_secret`; only the
+  secret-less default client uses `AUTH_CLIENT_SECRET`.
+- **App-local passwords must meet the password policy (M15).**
+- **Disabling or deleting an app now stops token refresh (H5/M10);** deleting an app
+  also removes its app-local users (H8); rotating an app secret revokes its
+  outstanding management tokens (L4).
+
+### I3 — group-derived roles are stale on refresh — INFO — WONTFIX (by design)
+Neither refresh path re-reads the directory, so an AD group change isn't reflected in
+group-derived per-app roles until the user's next interactive login. This is inherent
+to the persisted-`Groups` design (M3): it lets every flow resolve group roles without
+a live LDAP round-trip on each token. The staleness window is bounded by the
+access-token TTL, and **M13** now guarantees the next interactive login reconciles the
+set (including clearing all groups). Operators who need immediate revocation should use
+the access-revocation kill switch (`IsUserAccessRevoked`, honored on refresh per M3) or
+a short access-token TTL. Revisit if a directory-change webhook/poll is added.
 </content>
