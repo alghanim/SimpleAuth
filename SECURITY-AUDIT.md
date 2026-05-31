@@ -65,7 +65,7 @@ source of truth for what is currently open vs. fixed.
 | M10 | OIDC refresh nil-derefs on disabled/deleted app; refresh skips app-disable | MEDIUM | FIXED | 2026-05-31 (branch `v2`) |
 | M11 | OIDC `client_credentials`/`password` use the global secret but mint any app's `aud` | MEDIUM | FIXED | 2026-05-31 (branch `v2`) |
 | M12 | Kerberos auto-provision binding hijack via app-set `email`/`display_name` | MEDIUM | FIXED | 2026-05-31 (branch `v2`) |
-| M13 | Group list never cleared when a user leaves all directory groups (stale roles) | MEDIUM | OPEN | — (v2 branch, pre-release) |
+| M13 | Group list never cleared when a user leaves all directory groups (stale roles) | MEDIUM | FIXED | 2026-05-31 (branch `v2`) |
 | M14 | Deleting an app-local user leaves a dangling mapping (username unprovisionable) | MEDIUM | FIXED | 2026-05-31 (branch `v2`) |
 | M15 | App-local provisioning + reset bypass the password policy | MEDIUM | OPEN | — (v2 branch, pre-release) |
 | M16 | No rate-limit on `/api/app/token` + `/api/app/*` Basic auth (app_secret brute-force) | MEDIUM | OPEN | — (v2 branch, pre-release) |

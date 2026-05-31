@@ -332,7 +332,10 @@ func (h *Handler) syncUserFromLDAP(user *store.User, result *auth.LDAPResult) {
 	}
 	// Persist the user's directory groups so per-app group assignments (v2 M3)
 	// can be resolved at token issuance in every flow (not just the live login).
-	if len(result.Groups) > 0 && strings.Join(result.Groups, "\x00") != strings.Join(user.Groups, "\x00") {
+	// sync runs only after a successful bind, so an EMPTY group list is
+	// authoritative: a user removed from all groups must have the stale set cleared,
+	// otherwise group-derived per-app roles persist after de-grouping (M13).
+	if strings.Join(result.Groups, "\x00") != strings.Join(user.Groups, "\x00") {
 		user.Groups = result.Groups
 		changed = true
 	}

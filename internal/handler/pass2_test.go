@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"simpleauth/internal/auth"
 	"simpleauth/internal/store"
 )
 
@@ -74,6 +75,23 @@ func TestH5_RefreshKeepsPerAppScope(t *testing.T) {
 	}, adm)
 	if w := doJSON(h, "POST", "/api/auth/refresh", map[string]interface{}{"refresh_token": rt["refresh_token"].(string)}, nil); w.Code != http.StatusForbidden {
 		t.Fatalf("refresh after de-assignment must be denied, got %d %s", w.Code, w.Body.String())
+	}
+}
+
+// TestM13_EmptyGroupsClearStaleGroups covers Audit Pass 2 / M13: an LDAP re-sync
+// that returns no groups (user removed from all groups) must clear the cached
+// groups, not leave the stale set that keeps awarding group-derived roles.
+func TestM13_EmptyGroupsClearStaleGroups(t *testing.T) {
+	h, s := testSetup(t)
+	u := &store.User{DisplayName: "Grouped User", Email: "g@corp", SAMAccountName: "guser", Groups: []string{"admins", "vpn"}}
+	if err := s.CreateUser(u); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// re-sync after the user was removed from every group
+	h.syncUserFromLDAP(u, &auth.LDAPResult{Username: "guser", DisplayName: "Grouped User", Email: "g@corp", Groups: nil})
+	got, _ := s.GetUser(u.GUID)
+	if len(got.Groups) != 0 {
+		t.Fatalf("stale groups must be cleared on an empty LDAP result, got %v", got.Groups)
 	}
 }
 
