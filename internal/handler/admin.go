@@ -184,11 +184,26 @@ func (h *Handler) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	guid := pathParam(r, "guid")
-	log.Printf("[admin] User deleted guid=%s ip=%s", guid, getClientIP(r))
+	ip := getClientIP(r)
+	log.Printf("[admin] User deleted guid=%s ip=%s", guid, ip)
 	if err := h.store.DeleteUser(guid); err != nil {
 		jsonError(w, "failed to delete user", http.StatusInternalServerError)
 		return
 	}
+	// Invalidate everything tied to the deleted user so a still-live token or SSO
+	// session cannot keep acting as them: blacklist outstanding access tokens,
+	// drop refresh-token families, and clear shared SSO sessions. Best-effort —
+	// the user row is already gone (errors logged, not fatal).
+	if err := h.store.RevokeAllUserAccessTokens(guid, time.Now().Add(h.cfg.AccessTTL)); err != nil {
+		log.Printf("[admin] delete-user: revoke access tokens failed guid=%s err=%v", guid, err)
+	}
+	if err := h.store.RevokeUserTokens(guid); err != nil {
+		log.Printf("[admin] delete-user: revoke refresh tokens failed guid=%s err=%v", guid, err)
+	}
+	if err := h.store.DeleteUserSessions(guid); err != nil {
+		log.Printf("[admin] delete-user: clear SSO sessions failed guid=%s err=%v", guid, err)
+	}
+	h.audit("user_deleted", "admin", ip, map[string]interface{}{"target_guid": guid})
 	jsonResp(w, map[string]string{"status": "deleted"}, http.StatusOK)
 }
 
@@ -285,14 +300,14 @@ func (h *Handler) handleSetDisabled(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleGetPasswordPolicy(w http.ResponseWriter, r *http.Request) {
 	pp := h.passwordPolicy()
 	jsonResp(w, map[string]interface{}{
-		"min_length":         pp.MinLength,
-		"require_uppercase":  pp.RequireUppercase,
-		"require_lowercase":  pp.RequireLowercase,
-		"require_digit":      pp.RequireDigit,
-		"require_special":    pp.RequireSpecial,
-		"history_count":      h.getPasswordHistoryCount(),
-		"lockout_threshold":  h.getAccountLockoutThreshold(),
-		"lockout_duration":   h.getAccountLockoutDuration().String(),
+		"min_length":        pp.MinLength,
+		"require_uppercase": pp.RequireUppercase,
+		"require_lowercase": pp.RequireLowercase,
+		"require_digit":     pp.RequireDigit,
+		"require_special":   pp.RequireSpecial,
+		"history_count":     h.getPasswordHistoryCount(),
+		"lockout_threshold": h.getAccountLockoutThreshold(),
+		"lockout_duration":  h.getAccountLockoutDuration().String(),
 	}, http.StatusOK)
 }
 
@@ -736,7 +751,9 @@ func (h *Handler) handleRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("[admin] Database restored successfully ip=%s", getClientIP(r))
+	ip := getClientIP(r)
+	log.Printf("[admin] Database restored successfully ip=%s", ip)
+	h.audit("db_restored", "admin", ip, nil)
 	jsonResp(w, map[string]string{"status": "restored"}, http.StatusOK)
 }
 

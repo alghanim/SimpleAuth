@@ -5,36 +5,58 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"sort"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
-	bolt "go.etcd.io/bbolt"
 	"github.com/google/uuid"
+	bolt "go.etcd.io/bbolt"
 )
 
 var (
-	bucketConfig           = []byte("config")
-	bucketUsers            = []byte("users")
-	bucketIdentityMappings = []byte("identity_mappings")
-	bucketUserRoles        = []byte("user_roles")
-	bucketUserPermissions  = []byte("user_permissions")
-	bucketRefreshTokens    = []byte("refresh_tokens")
-	bucketAuditLog         = []byte("audit_log")
+	bucketConfig            = []byte("config")
+	bucketUsers             = []byte("users")
+	bucketIdentityMappings  = []byte("identity_mappings")
+	bucketUserRoles         = []byte("user_roles")
+	bucketUserPermissions   = []byte("user_permissions")
+	bucketRefreshTokens     = []byte("refresh_tokens")
+	bucketAuditLog          = []byte("audit_log")
 	bucketIdxMappingsByGUID = []byte("idx_mappings_by_guid")
-	bucketRegTokens        = []byte("reg_tokens")
-	bucketOIDCAuthCodes    = []byte("oidc_auth_codes")
-	bucketRevokedTokens    = []byte("revoked_tokens")
-	bucketRevokedUsers     = []byte("revoked_users")
-	bucketSessions         = []byte("sessions")
-	bucketApps             = []byte("apps")
-	bucketAppAuthz         = []byte("app_authz")
+	bucketRegTokens         = []byte("reg_tokens")
+	bucketOIDCAuthCodes     = []byte("oidc_auth_codes")
+	bucketRevokedTokens     = []byte("revoked_tokens")
+	bucketRevokedUsers      = []byte("revoked_users")
+	bucketSessions          = []byte("sessions")
+	bucketApps              = []byte("apps")
+	bucketAppAuthz          = []byte("app_authz")
 )
 
 // BoltStore implements the Store interface using BoltDB (bbolt).
 type BoltStore struct {
+	mu sync.RWMutex // guards db against the close/reopen swap performed by Restore
 	db *bolt.DB
+}
+
+// view/update run a bbolt transaction against the current handle, reading the
+// pointer under the read lock so a concurrent Restore (which swaps the handle
+// under the write lock for its whole close→replace→reopen sequence) can never
+// race the field access. Previously Restore reassigned s.db with no
+// synchronization while other goroutines read it — a data race that could panic
+// or brick the store.
+func (s *BoltStore) view(fn func(*bolt.Tx) error) error {
+	s.mu.RLock()
+	db := s.db
+	s.mu.RUnlock()
+	return db.View(fn)
+}
+
+func (s *BoltStore) update(fn func(*bolt.Tx) error) error {
+	s.mu.RLock()
+	db := s.db
+	s.mu.RUnlock()
+	return db.Update(fn)
 }
 
 // OpenBolt creates a new BoltStore.
@@ -57,13 +79,15 @@ func OpenBolt(dataDir string) (*BoltStore, error) {
 }
 
 func (s *BoltStore) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.db.Close()
 }
 
 // --- Apps (v2) ---
 
 func (s *BoltStore) CreateApp(a *App) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketApps)
 		if b.Get([]byte(a.AppID)) != nil {
 			return ErrAppExists
@@ -78,10 +102,10 @@ func (s *BoltStore) CreateApp(a *App) error {
 
 func (s *BoltStore) GetApp(appID string) (*App, error) {
 	var a App
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		data := tx.Bucket(bucketApps).Get([]byte(appID))
 		if data == nil {
-			return fmt.Errorf("app not found")
+			return ErrAppNotFound
 		}
 		return json.Unmarshal(data, &a)
 	})
@@ -93,7 +117,7 @@ func (s *BoltStore) GetApp(appID string) (*App, error) {
 
 func (s *BoltStore) ListApps() ([]*App, error) {
 	var apps []*App
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketApps).ForEach(func(k, v []byte) error {
 			var a App
 			if err := json.Unmarshal(v, &a); err != nil {
@@ -107,7 +131,7 @@ func (s *BoltStore) ListApps() ([]*App, error) {
 }
 
 func (s *BoltStore) UpdateApp(a *App) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketApps)
 		if b.Get([]byte(a.AppID)) == nil {
 			return fmt.Errorf("app not found")
@@ -121,7 +145,7 @@ func (s *BoltStore) UpdateApp(a *App) error {
 }
 
 func (s *BoltStore) DeleteApp(appID string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		// Cascade: delete the app's app-local users and every identity mapping they
 		// own, so re-registering the same app_id cannot resurrect ghost accounts
 		// (and their password hashes) under a new owner (H8). Collect first —
@@ -167,7 +191,7 @@ func (s *BoltStore) DeleteApp(appID string) error {
 
 func (s *BoltStore) GetAppAuthz(appID string) (*AppAuthz, error) {
 	authz := &AppAuthz{AppID: appID}
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		data := tx.Bucket(bucketAppAuthz).Get([]byte(appID))
 		if data == nil {
 			return nil // none stored — return zero-value
@@ -181,7 +205,7 @@ func (s *BoltStore) GetAppAuthz(appID string) (*AppAuthz, error) {
 }
 
 func (s *BoltStore) SaveAppAuthz(authz *AppAuthz) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		data, err := json.Marshal(authz)
 		if err != nil {
 			return err
@@ -191,7 +215,7 @@ func (s *BoltStore) SaveAppAuthz(authz *AppAuthz) error {
 }
 
 func (s *BoltStore) init() error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		for _, b := range [][]byte{
 			bucketConfig, bucketUsers,
 			bucketIdentityMappings, bucketUserRoles, bucketUserPermissions,
@@ -220,7 +244,7 @@ func (s *BoltStore) init() error {
 func (s *BoltStore) migrateRolesAndPermissions() {
 	// Collect all roles assigned to users
 	roleSet := map[string]struct{}{}
-	_ = s.db.View(func(tx *bolt.Tx) error {
+	_ = s.view(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketUserRoles).ForEach(func(k, v []byte) error {
 			var roles []string
 			if json.Unmarshal(v, &roles) == nil {
@@ -234,7 +258,7 @@ func (s *BoltStore) migrateRolesAndPermissions() {
 
 	// Collect all permissions assigned to users
 	permSet := map[string]struct{}{}
-	_ = s.db.View(func(tx *bolt.Tx) error {
+	_ = s.view(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketUserPermissions).ForEach(func(k, v []byte) error {
 			var perms []string
 			if json.Unmarshal(v, &perms) == nil {
@@ -297,7 +321,7 @@ func (s *BoltStore) CreateUser(u *User) error {
 	if u.CreatedAt.IsZero() {
 		u.CreatedAt = time.Now().UTC()
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		data, err := json.Marshal(u)
 		if err != nil {
 			return err
@@ -308,7 +332,7 @@ func (s *BoltStore) CreateUser(u *User) error {
 
 func (s *BoltStore) GetUser(guid string) (*User, error) {
 	var u User
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		data := tx.Bucket(bucketUsers).Get([]byte(guid))
 		if data == nil {
 			return fmt.Errorf("user not found: %s", guid)
@@ -342,7 +366,7 @@ func (s *BoltStore) ResolveUser(guid string) (*User, error) {
 }
 
 func (s *BoltStore) UpdateUser(u *User) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		existing := tx.Bucket(bucketUsers).Get([]byte(u.GUID))
 		if existing == nil {
 			return fmt.Errorf("user not found: %s", u.GUID)
@@ -356,14 +380,14 @@ func (s *BoltStore) UpdateUser(u *User) error {
 }
 
 func (s *BoltStore) DeleteUser(guid string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketUsers).Delete([]byte(guid))
 	})
 }
 
 func (s *BoltStore) ListUsers() ([]*User, error) {
 	var users []*User
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketUsers).ForEach(func(k, v []byte) error {
 			var u User
 			if err := json.Unmarshal(v, &u); err != nil {
@@ -380,7 +404,7 @@ func (s *BoltStore) ListUsers() ([]*User, error) {
 
 func (s *BoltStore) GetLDAPConfig() (*LDAPConfig, error) {
 	var cfg LDAPConfig
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		data := tx.Bucket(bucketConfig).Get([]byte("ldap:config"))
 		if data == nil {
 			return fmt.Errorf("ldap not configured")
@@ -397,7 +421,7 @@ func (s *BoltStore) SaveLDAPConfig(cfg *LDAPConfig) error {
 	if cfg.ConfiguredAt.IsZero() {
 		cfg.ConfiguredAt = time.Now().UTC()
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		data, err := json.Marshal(cfg)
 		if err != nil {
 			return err
@@ -407,7 +431,7 @@ func (s *BoltStore) SaveLDAPConfig(cfg *LDAPConfig) error {
 }
 
 func (s *BoltStore) DeleteLDAPConfig() error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketConfig).Delete([]byte("ldap:config"))
 	})
 }
@@ -419,7 +443,7 @@ func mappingKey(provider, externalID string) []byte {
 }
 
 func (s *BoltStore) SetIdentityMapping(provider, externalID, userGUID string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		key := mappingKey(provider, externalID)
 		if err := tx.Bucket(bucketIdentityMappings).Put(key, []byte(userGUID)); err != nil {
 			return err
@@ -431,7 +455,7 @@ func (s *BoltStore) SetIdentityMapping(provider, externalID, userGUID string) er
 
 func (s *BoltStore) ResolveMapping(provider, externalID string) (string, error) {
 	var guid string
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		v := tx.Bucket(bucketIdentityMappings).Get(mappingKey(provider, externalID))
 		if v == nil {
 			return fmt.Errorf("mapping not found: %s:%s", provider, externalID)
@@ -443,7 +467,7 @@ func (s *BoltStore) ResolveMapping(provider, externalID string) (string, error) 
 }
 
 func (s *BoltStore) DeleteIdentityMapping(provider, externalID string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		key := mappingKey(provider, externalID)
 		// Find the GUID first for reverse index cleanup
 		guid := tx.Bucket(bucketIdentityMappings).Get(key)
@@ -459,7 +483,7 @@ func (s *BoltStore) DeleteIdentityMapping(provider, externalID string) error {
 
 func (s *BoltStore) GetMappingsForUser(userGUID string) ([]IdentityMapping, error) {
 	var mappings []IdentityMapping
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		data := tx.Bucket(bucketIdxMappingsByGUID).Get([]byte(userGUID))
 		if data == nil {
 			return nil
@@ -515,7 +539,7 @@ func (s *BoltStore) removeMappingFromIndex(tx *bolt.Tx, userGUID string, m Ident
 
 func (s *BoltStore) ListAllMappings() ([]IdentityMappingEntry, error) {
 	var result []IdentityMappingEntry
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketIdentityMappings)
 		return b.ForEach(func(k, v []byte) error {
 			key := string(k)
@@ -537,7 +561,7 @@ func (s *BoltStore) ListAllMappings() ([]IdentityMappingEntry, error) {
 // --- Roles & Permissions (no app scoping) ---
 
 func (s *BoltStore) SetUserRoles(guid string, roles []string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		data, err := json.Marshal(roles)
 		if err != nil {
 			return err
@@ -548,7 +572,7 @@ func (s *BoltStore) SetUserRoles(guid string, roles []string) error {
 
 func (s *BoltStore) GetUserRoles(guid string) ([]string, error) {
 	var roles []string
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		data := tx.Bucket(bucketUserRoles).Get([]byte(guid))
 		if data == nil {
 			return nil
@@ -559,7 +583,7 @@ func (s *BoltStore) GetUserRoles(guid string) ([]string, error) {
 }
 
 func (s *BoltStore) SetUserPermissions(guid string, perms []string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		data, err := json.Marshal(perms)
 		if err != nil {
 			return err
@@ -570,7 +594,7 @@ func (s *BoltStore) SetUserPermissions(guid string, perms []string) error {
 
 func (s *BoltStore) GetUserPermissions(guid string) ([]string, error) {
 	var perms []string
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		data := tx.Bucket(bucketUserPermissions).Get([]byte(guid))
 		if data == nil {
 			return nil
@@ -602,14 +626,14 @@ func (s *BoltStore) ListAllPermissions() ([]string, error) {
 // --- Config (generic key-value in config bucket) ---
 
 func (s *BoltStore) SetConfigValue(key string, value []byte) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketConfig).Put([]byte(key), value)
 	})
 }
 
 func (s *BoltStore) GetConfigValue(key string) ([]byte, error) {
 	var val []byte
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		data := tx.Bucket(bucketConfig).Get([]byte(key))
 		if data != nil {
 			val = make([]byte, len(data))
@@ -621,7 +645,7 @@ func (s *BoltStore) GetConfigValue(key string) ([]byte, error) {
 }
 
 func (s *BoltStore) DeleteConfigValue(key string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketConfig).Delete([]byte(key))
 	})
 }
@@ -630,7 +654,7 @@ func (s *BoltStore) DeleteConfigValue(key string) error {
 
 func (s *BoltStore) GetDefaultRoles() ([]string, error) {
 	var roles []string
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		data := tx.Bucket(bucketConfig).Get([]byte("default_roles"))
 		if data == nil {
 			return nil
@@ -641,7 +665,7 @@ func (s *BoltStore) GetDefaultRoles() ([]string, error) {
 }
 
 func (s *BoltStore) SetDefaultRoles(roles []string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		data, err := json.Marshal(roles)
 		if err != nil {
 			return err
@@ -656,7 +680,7 @@ func (s *BoltStore) SetDefaultRoles(roles []string) error {
 // This is also the role registry: keys are all defined roles.
 func (s *BoltStore) GetRolePermissions() (map[string][]string, error) {
 	var mapping map[string][]string
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		data := tx.Bucket(bucketConfig).Get([]byte("role_permissions"))
 		if data == nil {
 			return nil
@@ -668,7 +692,7 @@ func (s *BoltStore) GetRolePermissions() (map[string][]string, error) {
 
 // SetRolePermissions sets the role→permissions mapping.
 func (s *BoltStore) SetRolePermissions(mapping map[string][]string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		data, err := json.Marshal(mapping)
 		if err != nil {
 			return err
@@ -693,7 +717,7 @@ func (s *BoltStore) RoleExists(role string) (bool, error) {
 // GetDefinedPermissions returns the master list of defined permissions.
 func (s *BoltStore) GetDefinedPermissions() ([]string, error) {
 	var perms []string
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		data := tx.Bucket(bucketConfig).Get([]byte("defined_permissions"))
 		if data == nil {
 			return nil
@@ -705,7 +729,7 @@ func (s *BoltStore) GetDefinedPermissions() ([]string, error) {
 
 // SetDefinedPermissions sets the master list of defined permissions.
 func (s *BoltStore) SetDefinedPermissions(perms []string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		data, err := json.Marshal(perms)
 		if err != nil {
 			return err
@@ -802,7 +826,7 @@ func (s *BoltStore) ResolvePermissions(roles, directPerms []string) ([]string, e
 // --- Refresh Tokens ---
 
 func (s *BoltStore) SaveRefreshToken(rt *RefreshToken) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		data, err := json.Marshal(rt)
 		if err != nil {
 			return err
@@ -813,7 +837,7 @@ func (s *BoltStore) SaveRefreshToken(rt *RefreshToken) error {
 
 func (s *BoltStore) GetRefreshToken(tokenID string) (*RefreshToken, error) {
 	var rt RefreshToken
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		data := tx.Bucket(bucketRefreshTokens).Get([]byte(tokenID))
 		if data == nil {
 			return fmt.Errorf("refresh token not found")
@@ -827,7 +851,7 @@ func (s *BoltStore) GetRefreshToken(tokenID string) (*RefreshToken, error) {
 }
 
 func (s *BoltStore) MarkRefreshTokenUsed(tokenID string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		data := tx.Bucket(bucketRefreshTokens).Get([]byte(tokenID))
 		if data == nil {
 			return fmt.Errorf("refresh token not found")
@@ -851,7 +875,7 @@ func (s *BoltStore) MarkRefreshTokenUsed(tokenID string) error {
 // ErrRefreshTokenReused.
 func (s *BoltStore) ConsumeRefreshToken(tokenID string) (*RefreshToken, error) {
 	var rt RefreshToken
-	err := s.db.Update(func(tx *bolt.Tx) error {
+	err := s.update(func(tx *bolt.Tx) error {
 		data := tx.Bucket(bucketRefreshTokens).Get([]byte(tokenID))
 		if data == nil {
 			return ErrRefreshTokenNotFound
@@ -877,7 +901,7 @@ func (s *BoltStore) ConsumeRefreshToken(tokenID string) (*RefreshToken, error) {
 
 // RevokeTokenFamily deletes all refresh tokens belonging to a family.
 func (s *BoltStore) RevokeTokenFamily(familyID string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketRefreshTokens)
 		var toDelete [][]byte
 		b.ForEach(func(k, v []byte) error {
@@ -900,7 +924,7 @@ func (s *BoltStore) RevokeTokenFamily(familyID string) error {
 func (s *BoltStore) ListUserSessions(userGUID string) ([]*RefreshToken, error) {
 	var sessions []*RefreshToken
 	now := time.Now()
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketRefreshTokens).ForEach(func(k, v []byte) error {
 			var rt RefreshToken
 			if err := json.Unmarshal(v, &rt); err != nil {
@@ -917,7 +941,7 @@ func (s *BoltStore) ListUserSessions(userGUID string) ([]*RefreshToken, error) {
 
 // RevokeUserTokens deletes all refresh tokens for a user.
 func (s *BoltStore) RevokeUserTokens(userGUID string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketRefreshTokens)
 		var toDelete [][]byte
 		b.ForEach(func(k, v []byte) error {
@@ -945,7 +969,7 @@ func (s *BoltStore) WriteAuditLog(entry *AuditEntry) error {
 	if entry.Timestamp.IsZero() {
 		entry.Timestamp = time.Now().UTC()
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		data, err := json.Marshal(entry)
 		if err != nil {
 			return err
@@ -960,7 +984,7 @@ func (s *BoltStore) QueryAuditLog(q AuditQuery) ([]*AuditEntry, error) {
 		q.Limit = 100
 	}
 	var entries []*AuditEntry
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		c := tx.Bucket(bucketAuditLog).Cursor()
 		skipped := 0
 		for k, v := c.Last(); k != nil; k, v = c.Prev() {
@@ -996,7 +1020,7 @@ func (s *BoltStore) QueryAuditLog(q AuditQuery) ([]*AuditEntry, error) {
 
 func (s *BoltStore) PruneAuditLog(retention time.Duration) error {
 	cutoff := time.Now().UTC().Add(-retention)
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketAuditLog)
 		c := b.Cursor()
 		for k, v := c.First(); k != nil; k, v = c.Next() {
@@ -1024,7 +1048,7 @@ func (s *BoltStore) MergeUsers(sourceGUIDs []string, displayName, email string) 
 		CreatedAt:   time.Now().UTC(),
 	}
 
-	err := s.db.Update(func(tx *bolt.Tx) error {
+	err := s.update(func(tx *bolt.Tx) error {
 		// Create the new user
 		userData, err := json.Marshal(newUser)
 		if err != nil {
@@ -1116,7 +1140,7 @@ func (s *BoltStore) MergeUsers(sourceGUIDs []string, displayName, email string) 
 }
 
 func (s *BoltStore) UnmergeUser(guid string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		data := tx.Bucket(bucketUsers).Get([]byte(guid))
 		if data == nil {
 			return fmt.Errorf("user not found: %s", guid)
@@ -1140,13 +1164,13 @@ func (s *BoltStore) UnmergeUser(guid string) error {
 // --- Backup ---
 
 func (s *BoltStore) Backup(path string) error {
-	return s.db.View(func(tx *bolt.Tx) error {
+	return s.view(func(tx *bolt.Tx) error {
 		return tx.CopyFile(path, 0600)
 	})
 }
 
 func (s *BoltStore) BackupWriter(w io.Writer) error {
-	return s.db.View(func(tx *bolt.Tx) error {
+	return s.view(func(tx *bolt.Tx) error {
 		_, err := tx.WriteTo(w)
 		return err
 	})
@@ -1155,6 +1179,12 @@ func (s *BoltStore) BackupWriter(w io.Writer) error {
 // Restore replaces the current database with data from an io.Reader.
 // It closes the current DB, writes the new file, and reopens.
 func (s *BoltStore) Restore(r io.Reader) error {
+	// Hold the write lock for the entire close→replace→reopen sequence so no
+	// view/update transaction can read the db handle mid-swap. view/update block
+	// on the read lock until the restore completes.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	dbPath := s.db.Path()
 
 	// Close current DB
@@ -1198,6 +1228,8 @@ func (s *BoltStore) Restore(r io.Reader) error {
 	return s.reopen(dbPath)
 }
 
+// reopen reassigns the db handle. It assumes the caller holds s.mu for writing
+// (it is only ever called from Restore, which does).
 func (s *BoltStore) reopen(dbPath string) error {
 	db, err := bolt.Open(dbPath, 0600, &bolt.Options{Timeout: 5 * time.Second})
 	if err != nil {
@@ -1210,7 +1242,7 @@ func (s *BoltStore) reopen(dbPath string) error {
 // --- OIDC Authorization Codes ---
 
 func (s *BoltStore) SaveOIDCAuthCode(code *OIDCAuthCode) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		data, err := json.Marshal(code)
 		if err != nil {
 			return err
@@ -1222,7 +1254,7 @@ func (s *BoltStore) SaveOIDCAuthCode(code *OIDCAuthCode) error {
 // ConsumeOIDCAuthCode retrieves and deletes an auth code atomically.
 func (s *BoltStore) ConsumeOIDCAuthCode(code string) (*OIDCAuthCode, error) {
 	var ac OIDCAuthCode
-	err := s.db.Update(func(tx *bolt.Tx) error {
+	err := s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketOIDCAuthCodes)
 		data := b.Get([]byte(code))
 		if data == nil {
@@ -1266,7 +1298,7 @@ func (s *BoltStore) SaveRuntimeSettings(rs *RuntimeSettings) error {
 // --- Token Revocation ---
 
 func (s *BoltStore) RevokeAccessToken(jti string, expiresAt time.Time) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		data, _ := json.Marshal(expiresAt)
 		return tx.Bucket(bucketRevokedTokens).Put([]byte(jti), data)
 	})
@@ -1274,7 +1306,7 @@ func (s *BoltStore) RevokeAccessToken(jti string, expiresAt time.Time) error {
 
 func (s *BoltStore) IsAccessTokenRevoked(jti string) (bool, error) {
 	var revoked bool
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		data := tx.Bucket(bucketRevokedTokens).Get([]byte(jti))
 		if data != nil {
 			revoked = true
@@ -1286,7 +1318,7 @@ func (s *BoltStore) IsAccessTokenRevoked(jti string) (bool, error) {
 
 func (s *BoltStore) CleanExpiredRevocations() error {
 	now := time.Now()
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketRevokedTokens)
 		var toDelete [][]byte
 		b.ForEach(func(k, v []byte) error {
@@ -1317,7 +1349,7 @@ func (s *BoltStore) CleanExpiredRevocations() error {
 }
 
 func (s *BoltStore) RevokeAllUserAccessTokens(userGUID string, expiresAt time.Time) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		data, _ := json.Marshal(expiresAt)
 		return tx.Bucket(bucketRevokedUsers).Put([]byte(userGUID), data)
 	})
@@ -1325,7 +1357,7 @@ func (s *BoltStore) RevokeAllUserAccessTokens(userGUID string, expiresAt time.Ti
 
 func (s *BoltStore) IsUserAccessRevoked(userGUID string) (bool, error) {
 	var revoked bool
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		data := tx.Bucket(bucketRevokedUsers).Get([]byte(userGUID))
 		if data != nil {
 			var expiresAt time.Time
@@ -1347,13 +1379,15 @@ func (s *BoltStore) DatabaseInfo() (*DatabaseInfo, error) {
 	}
 
 	// Get file size
+	s.mu.RLock()
 	path := s.db.Path()
+	s.mu.RUnlock()
 	if fi, err := os.Stat(path); err == nil {
 		info.SizeMB = float64(fi.Size()) / 1024 / 1024
 	}
 
 	// Count rows per bucket
-	s.db.View(func(tx *bolt.Tx) error {
+	s.view(func(tx *bolt.Tx) error {
 		for _, bname := range []string{
 			"users", "identity_mappings", "user_roles", "user_permissions",
 			"config", "refresh_tokens", "audit_log", "oidc_auth_codes",
@@ -1384,7 +1418,7 @@ func (s *BoltStore) DatabaseInfo() (*DatabaseInfo, error) {
 // --- SSO Sessions ---
 
 func (s *BoltStore) CreateSession(sess *Session) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		data, err := json.Marshal(sess)
 		if err != nil {
 			return err
@@ -1395,7 +1429,7 @@ func (s *BoltStore) CreateSession(sess *Session) error {
 
 func (s *BoltStore) GetSession(id string) (*Session, error) {
 	var sess Session
-	err := s.db.View(func(tx *bolt.Tx) error {
+	err := s.view(func(tx *bolt.Tx) error {
 		data := tx.Bucket(bucketSessions).Get([]byte(id))
 		if data == nil {
 			return fmt.Errorf("session not found")
@@ -1409,7 +1443,7 @@ func (s *BoltStore) GetSession(id string) (*Session, error) {
 }
 
 func (s *BoltStore) TouchSession(id string, lastUsed time.Time) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketSessions)
 		data := b.Get([]byte(id))
 		if data == nil {
@@ -1429,13 +1463,13 @@ func (s *BoltStore) TouchSession(id string, lastUsed time.Time) error {
 }
 
 func (s *BoltStore) DeleteSession(id string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketSessions).Delete([]byte(id))
 	})
 }
 
 func (s *BoltStore) DeleteUserSessions(userGUID string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketSessions)
 		var toDelete [][]byte
 		b.ForEach(func(k, v []byte) error {
@@ -1452,9 +1486,53 @@ func (s *BoltStore) DeleteUserSessions(userGUID string) error {
 	})
 }
 
+func (s *BoltStore) CleanExpiredOIDCCodes() error {
+	now := time.Now()
+	return s.update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketOIDCAuthCodes)
+		if b == nil {
+			return nil
+		}
+		var toDelete [][]byte
+		b.ForEach(func(k, v []byte) error {
+			var c OIDCAuthCode
+			if json.Unmarshal(v, &c) == nil && c.ExpiresAt.Before(now) {
+				toDelete = append(toDelete, k)
+			}
+			return nil
+		})
+		for _, k := range toDelete {
+			b.Delete(k)
+		}
+		return nil
+	})
+}
+
+func (s *BoltStore) CleanExpiredRefreshTokens() error {
+	now := time.Now()
+	return s.update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketRefreshTokens)
+		if b == nil {
+			return nil
+		}
+		var toDelete [][]byte
+		b.ForEach(func(k, v []byte) error {
+			var rt RefreshToken
+			if json.Unmarshal(v, &rt) == nil && rt.ExpiresAt.Before(now) {
+				toDelete = append(toDelete, k)
+			}
+			return nil
+		})
+		for _, k := range toDelete {
+			b.Delete(k)
+		}
+		return nil
+	})
+}
+
 func (s *BoltStore) CleanExpiredSessions() error {
 	now := time.Now()
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketSessions)
 		var toDelete [][]byte
 		b.ForEach(func(k, v []byte) error {

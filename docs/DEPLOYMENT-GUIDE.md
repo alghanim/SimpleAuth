@@ -552,7 +552,14 @@ Before going live, verify:
 - [ ] `AUTH_CORS_ORIGINS` set if frontend calls SimpleAuth directly
 - [ ] LDAP/AD configured and tested (green dot in admin UI)
 - [ ] Kerberos setup completed (if using SSO)
+- [ ] **NTP / time synchronization enabled on the SimpleAuth host** (required for
+      Kerberos — KDCs reject tickets when clocks skew more than ~5 minutes; e.g.
+      `timedatectl set-ntp true` / `systemctl enable --now chronyd`)
+- [ ] **`<data_dir>/secret.key` backed up securely** (the AES-256 key that
+      encrypts stored secrets such as the LDAP bind password — if this file is
+      lost, all `enc:v1:` values become undecryptable and LDAP/AD auth breaks)
 - [ ] Test user can log in and get a valid token
 - [ ] Token refresh works
 - [ ] Logout redirects correctly (use `/logout` not `/login`)
-- [ ] Health check responds: `GET /sauth/health`
+- [ ] Health check responds: `GET /health` (prefix with `AUTH_BASE_PATH` only if
+      you set one, e.g. `GET /auth/health`)

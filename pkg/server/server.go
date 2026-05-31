@@ -59,18 +59,18 @@ type Config = config.Config
 //	cfg.DataDir = "./auth-data"
 func Defaults() *Config {
 	return &Config{
-		Port:            "9090",
-		DataDir:         "./data",
-		BasePath:        "/sauth",
-		DeploymentName:  "sauth",
-		JWTIssuer:       "simpleauth",
-		AccessTTL:       15 * time.Minute,
-		RefreshTTL:      720 * time.Hour,
-		ImpersonateTTL:  1 * time.Hour,
-		AuditRetention:  90 * 24 * time.Hour,
-		RateLimitMax:    10,
-		RateLimitWindow: 1 * time.Minute,
-		HTTPPort:        "80",
+		Port:                   "9090",
+		DataDir:                "./data",
+		BasePath:               "/sauth",
+		DeploymentName:         "sauth",
+		JWTIssuer:              "simpleauth",
+		AccessTTL:              15 * time.Minute,
+		RefreshTTL:             720 * time.Hour,
+		ImpersonateTTL:         1 * time.Hour,
+		AuditRetention:         90 * 24 * time.Hour,
+		RateLimitMax:           10,
+		RateLimitWindow:        1 * time.Minute,
+		HTTPPort:               "80",
 		PasswordMinLength:      8,
 		AccountLockoutDuration: 30 * time.Minute,
 	}
@@ -80,6 +80,7 @@ func Defaults() *Config {
 type Server struct {
 	handler *handler.Handler
 	store   store.Store
+	stop    chan struct{}
 }
 
 // New creates a new embedded SimpleAuth server.
@@ -131,9 +132,10 @@ func New(cfg *Config, uiFS fs.FS) (*Server, error) {
 
 	h := handler.New(cfg, s, jwtMgr, uiFS, "embedded")
 
-	h.StartAuditPruner()
+	stop := make(chan struct{})
+	h.StartAuditPruner(stop)
 
-	return &Server{handler: h, store: s}, nil
+	return &Server{handler: h, store: s, stop: stop}, nil
 }
 
 // Handler returns the http.Handler for SimpleAuth.
@@ -144,6 +146,9 @@ func (s *Server) Handler() http.Handler {
 
 // Close shuts down the SimpleAuth server and releases resources.
 func (s *Server) Close() error {
+	if s.stop != nil {
+		close(s.stop)
+	}
 	return s.store.Close()
 }
 

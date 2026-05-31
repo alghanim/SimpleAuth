@@ -30,6 +30,14 @@ standalone runnable script.
 # SIMPLEAUTH_REALM = "simpleauth"                 # optional, default "simpleauth"
 # SIMPLEAUTH_VERIFY_SSL = True                    # optional, default True
 #
+# # SIMPLEAUTH_AUDIENCE -- this app's id. In the v2 per-app model the `aud`
+# # claim is the ONLY thing isolating one app's tokens from another's. If you
+# # omit it, the middleware accepts ANY app's token (and audience-less
+# # direct-login tokens), so the role/permission-protected views below would
+# # honor a token minted for some other app -- a cross-app confused-deputy
+# # bypass. Always set it to your app id in multi-app deployments.
+# SIMPLEAUTH_AUDIENCE = "my-app-id"               # set to this service's app id
+#
 # MIDDLEWARE = [
 #     "django.middleware.security.SecurityMiddleware",
 #     "django.contrib.sessions.middleware.SessionMiddleware",

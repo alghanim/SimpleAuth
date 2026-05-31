@@ -18,11 +18,11 @@ import (
 )
 
 type Handler struct {
-	cfg          *config.Config
-	store        store.Store
-	jwt          *auth.JWTManager
-	loginLimiter *rateLimiter
-	mux          *http.ServeMux
+	cfg             *config.Config
+	store           store.Store
+	jwt             *auth.JWTManager
+	loginLimiter    *rateLimiter
+	mux             *http.ServeMux
 	version         string
 	migration       *migrationState
 	runtimeSettings runtimeSettingsCache
@@ -71,14 +71,28 @@ func (h *Handler) SetRestartChannel(ch chan<- struct{}) {
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-SimpleAuth-Version", h.version)
 	// Baseline security headers on every response (M8). The admin UI sets a
-	// stricter CSP of its own; these are the safe global defaults.
+	// stricter CSP of its own; these are the safe global defaults. Frame
+	// protection is part of the baseline so login / OIDC / account pages — not
+	// just the admin UI — cannot be framed for clickjacking (M8 was incomplete).
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
 	corsOrigins := h.getCORSOrigins()
 	if corsOrigins != "" {
 		origin := r.Header.Get("Origin")
-		if origin != "" && h.isAllowedOrigin(origin) {
+		if corsOrigins == "*" {
+			// Public wildcard: emit a literal "*" rather than reflecting the
+			// caller's Origin. Reflecting an arbitrary origin invites a
+			// credentialed cross-site read; the literal "*" cannot be combined
+			// with credentials by the browser, so it fails safe (F64).
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			w.Header().Set("Access-Control-Max-Age", "86400")
+		} else if origin != "" && h.isAllowedOrigin(origin) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
 			w.Header().Set("Access-Control-Max-Age", "86400")
@@ -306,7 +320,7 @@ func (h *Handler) registerRoutes(uiFS fs.FS) {
 		fileServer := http.FileServerFS(uiFS)
 		setAdminHeaders := func(w http.ResponseWriter) {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'")
+			w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'")
 			w.Header().Set("X-Content-Type-Options", "nosniff")
 			w.Header().Set("X-Frame-Options", "DENY")
 			w.Header().Set("Referrer-Policy", "no-referrer")
@@ -339,19 +353,34 @@ func (h *Handler) registerRoutes(uiFS fs.FS) {
 	}
 }
 
-// StartAuditPruner runs a background goroutine to clean old audit entries.
-func (h *Handler) StartAuditPruner() {
+// StartAuditPruner runs a background goroutine that prunes audit entries and
+// expired sessions/revocations/refresh-tokens hourly. It returns when stop is
+// closed, so the caller can tear it down on graceful restart instead of leaking
+// one pruner goroutine (still referencing the now-closed store) per restart.
+func (h *Handler) StartAuditPruner(stop <-chan struct{}) {
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour)
-		for range ticker.C {
-			if err := h.store.PruneAuditLog(h.getAuditRetention()); err != nil {
-				log.Printf("audit prune error: %v", err)
-			}
-			if err := h.store.CleanExpiredRevocations(); err != nil {
-				log.Printf("revocation cleanup error: %v", err)
-			}
-			if err := h.store.CleanExpiredSessions(); err != nil {
-				log.Printf("session cleanup error: %v", err)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				if err := h.store.PruneAuditLog(h.getAuditRetention()); err != nil {
+					log.Printf("audit prune error: %v", err)
+				}
+				if err := h.store.CleanExpiredRevocations(); err != nil {
+					log.Printf("revocation cleanup error: %v", err)
+				}
+				if err := h.store.CleanExpiredSessions(); err != nil {
+					log.Printf("session cleanup error: %v", err)
+				}
+				if err := h.store.CleanExpiredRefreshTokens(); err != nil {
+					log.Printf("refresh-token cleanup error: %v", err)
+				}
+				if err := h.store.CleanExpiredOIDCCodes(); err != nil {
+					log.Printf("oidc-code cleanup error: %v", err)
+				}
 			}
 		}
 	}()
@@ -421,6 +450,7 @@ func ldapConfigFromStore(p *store.LDAPConfig) *auth.LDAPConfig {
 		CustomFilter:    p.CustomFilter,
 		UseTLS:          p.UseTLS,
 		SkipTLSVerify:   p.SkipTLSVerify,
+		AllowInsecure:   p.AllowInsecure,
 		DisplayNameAttr: p.DisplayNameAttr,
 		EmailAttr:       p.EmailAttr,
 		DepartmentAttr:  p.DepartmentAttr,

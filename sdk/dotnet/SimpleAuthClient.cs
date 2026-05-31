@@ -88,9 +88,20 @@ public class SimpleAuthClient : IDisposable
         if (parts.Length != 3)
             throw new SimpleAuthException("Invalid JWT: expected 3 parts.");
 
-        var headerJson = Base64UrlDecode(parts[0]);
-        var header = JsonSerializer.Deserialize<JwtHeader>(headerJson)
-            ?? throw new SimpleAuthException("Failed to parse JWT header.");
+        JwtHeader header;
+        try
+        {
+            var headerJson = Base64UrlDecode(parts[0]);
+            header = JsonSerializer.Deserialize<JwtHeader>(headerJson)
+                ?? throw new SimpleAuthException("Failed to parse JWT header.");
+        }
+        catch (Exception ex) when (ex is not SimpleAuthException)
+        {
+            // Header is attacker-controlled and parsed before signature
+            // verification — surface malformed/non-JSON input as our own
+            // exception type so the middleware/examples map it to a 401.
+            throw new SimpleAuthException("Invalid JWT header.", ex);
+        }
 
         if (!string.Equals(header.Alg, "RS256", StringComparison.OrdinalIgnoreCase))
             throw new SimpleAuthException($"Unsupported algorithm: {header.Alg}");
@@ -101,55 +112,83 @@ public class SimpleAuthClient : IDisposable
         var rsaParams = await GetRsaKeyAsync(kid);
         VerifySignature(parts[0], parts[1], parts[2], rsaParams);
 
-        // Decode payload
-        var payloadJson = Base64UrlDecode(parts[1]);
-        using var doc = JsonDocument.Parse(payloadJson);
-        var root = doc.RootElement;
-
-        // Reject refresh tokens presented as access tokens: they are signed by
-        // the same key but carry a family_id and no authorization claims.
-        if (root.TryGetProperty("family_id", out var famEl) &&
-            !string.IsNullOrEmpty(famEl.GetString()))
-            throw new SimpleAuthException("Refresh token is not valid for resource access.");
-
-        // Expiration is mandatory — fail closed if the claim is absent.
-        if (!root.TryGetProperty("exp", out var expEl))
-            throw new SimpleAuthException("Token missing a valid exp claim.");
-        var expTime = DateTimeOffset.FromUnixTimeSeconds(expEl.GetInt64());
-        if (expTime < DateTimeOffset.UtcNow)
-            throw new SimpleAuthException("Token has expired.");
-
-        // Issuer check is opt-in. Direct login tokens use iss="simpleauth", so
-        // the old hardcoded BaseUrl check rejected every login token — only
-        // enforce when an ExpectedIssuer is configured.
-        if (!string.IsNullOrEmpty(_options.ExpectedIssuer))
+        // Parse and validate claims. Wrap the whole body so that malformed or
+        // attacker-crafted claims (non-base64, non-JSON, or a non-numeric
+        // `exp`) raise a SimpleAuthException rather than an uncaught
+        // InvalidOperationException/FormatException/JsonException, which would
+        // escape the middleware as an unhandled 500 instead of a 401.
+        try
         {
-            var issuer = root.TryGetProperty("iss", out var issEl) ? issEl.GetString() : null;
-            if (!string.Equals(issuer, _options.ExpectedIssuer, StringComparison.Ordinal))
-                throw new SimpleAuthException($"Invalid issuer: {issuer}, expected: {_options.ExpectedIssuer}");
+            var payloadJson = Base64UrlDecode(parts[1]);
+            using var doc = JsonDocument.Parse(payloadJson);
+            var root = doc.RootElement;
+
+            // Reject refresh tokens presented as access tokens: they are signed by
+            // the same key but carry a family_id and no authorization claims.
+            if (root.TryGetProperty("family_id", out var famEl) &&
+                famEl.ValueKind == JsonValueKind.String &&
+                !string.IsNullOrEmpty(famEl.GetString()))
+                throw new SimpleAuthException("Refresh token is not valid for resource access.");
+
+            // Reject non-access token types. Access tokens carry no `typ`;
+            // OIDC ID tokens use typ="ID" and app-management tokens use
+            // typ="app-mgmt" — neither is a user access token even though both
+            // are signed by the same key.
+            if (root.TryGetProperty("typ", out var typEl) &&
+                typEl.ValueKind == JsonValueKind.String)
+            {
+                var typ = typEl.GetString();
+                if (string.Equals(typ, "ID", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(typ, "app-mgmt", StringComparison.OrdinalIgnoreCase))
+                    throw new SimpleAuthException("Token is not a user access token.");
+            }
+
+            // Expiration is mandatory — fail closed if the claim is absent or
+            // not a number.
+            if (!root.TryGetProperty("exp", out var expEl) ||
+                expEl.ValueKind != JsonValueKind.Number ||
+                !expEl.TryGetInt64(out var exp))
+                throw new SimpleAuthException("Token missing a valid exp claim.");
+            var expTime = DateTimeOffset.FromUnixTimeSeconds(exp);
+            if (expTime < DateTimeOffset.UtcNow)
+                throw new SimpleAuthException("Token has expired.");
+
+            // Issuer check is opt-in. Direct login tokens use iss="simpleauth", so
+            // the old hardcoded BaseUrl check rejected every login token — only
+            // enforce when an ExpectedIssuer is configured.
+            if (!string.IsNullOrEmpty(_options.ExpectedIssuer))
+            {
+                var issuer = root.TryGetProperty("iss", out var issEl) ? issEl.GetString() : null;
+                if (!string.Equals(issuer, _options.ExpectedIssuer, StringComparison.Ordinal))
+                    throw new SimpleAuthException($"Invalid issuer: {issuer}, expected: {_options.ExpectedIssuer}");
+            }
+
+            // Optional audience check.
+            if (!string.IsNullOrEmpty(_options.Audience) && !AudienceContains(root, _options.Audience!))
+                throw new SimpleAuthException($"Token audience does not include {_options.Audience}");
+
+            // Map claims to SimpleAuthUser
+            var user = new SimpleAuthUser
+            {
+                Sub = root.TryGetProperty("sub", out var sub) ? sub.GetString() ?? "" : "",
+                Name = root.TryGetProperty("name", out var name) ? name.GetString() : null,
+                Email = root.TryGetProperty("email", out var email) ? email.GetString() : null,
+                PreferredUsername = root.TryGetProperty("preferred_username", out var pref)
+                    ? pref.GetString() : null,
+                Department = root.TryGetProperty("department", out var dept) ? dept.GetString() : null,
+                Company = root.TryGetProperty("company", out var comp) ? comp.GetString() : null,
+                JobTitle = root.TryGetProperty("job_title", out var jt) ? jt.GetString() : null,
+                Roles = GetStringList(root, "roles"),
+                Permissions = GetStringList(root, "permissions"),
+                Groups = GetStringList(root, "groups"),
+            };
+
+            return user;
         }
-
-        // Optional audience check.
-        if (!string.IsNullOrEmpty(_options.Audience) && !AudienceContains(root, _options.Audience!))
-            throw new SimpleAuthException($"Token audience does not include {_options.Audience}");
-
-        // Map claims to SimpleAuthUser
-        var user = new SimpleAuthUser
+        catch (Exception ex) when (ex is not SimpleAuthException)
         {
-            Sub = root.TryGetProperty("sub", out var sub) ? sub.GetString() ?? "" : "",
-            Name = root.TryGetProperty("name", out var name) ? name.GetString() : null,
-            Email = root.TryGetProperty("email", out var email) ? email.GetString() : null,
-            PreferredUsername = root.TryGetProperty("preferred_username", out var pref)
-                ? pref.GetString() : null,
-            Department = root.TryGetProperty("department", out var dept) ? dept.GetString() : null,
-            Company = root.TryGetProperty("company", out var comp) ? comp.GetString() : null,
-            JobTitle = root.TryGetProperty("job_title", out var jt) ? jt.GetString() : null,
-            Roles = GetStringList(root, "roles"),
-            Permissions = GetStringList(root, "permissions"),
-            Groups = GetStringList(root, "groups"),
-        };
-
-        return user;
+            throw new SimpleAuthException("Invalid JWT claims.", ex);
+        }
     }
 
     private static bool AudienceContains(JsonElement root, string audience)

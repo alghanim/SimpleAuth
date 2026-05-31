@@ -35,12 +35,20 @@ from simpleauth.middleware import SimpleAuthDep
 # Server URL must include the base path (the stock server mounts at /sauth).
 SIMPLEAUTH_URL = os.environ.get("SIMPLEAUTH_URL", "https://auth.example.com/sauth")
 
+# The audience verify() requires -- this app's id. In the v2 per-app model the
+# `aud` claim is the ONLY thing that isolates one app's tokens from another's.
+# Without it, verify() accepts ANY app's token (and audience-less direct-login
+# tokens), so the role/permission-protected routes below would honor a token
+# minted for some other app -- a cross-app confused-deputy bypass. Always set it.
+AUDIENCE = os.environ.get("SIMPLEAUTH_AUDIENCE") or os.environ.get("SIMPLEAUTH_APP_ID")
+
 # TLS verification stays ON by default. Only set SIMPLEAUTH_INSECURE=true for
 # local development against a self-signed certificate.
 VERIFY_SSL = os.environ.get("SIMPLEAUTH_INSECURE") != "true"
 
 auth = SimpleAuth(
     url=SIMPLEAUTH_URL,
+    audience=AUDIENCE,
     verify_ssl=VERIFY_SSL,
 )
 

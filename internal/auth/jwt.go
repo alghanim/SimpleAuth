@@ -27,12 +27,12 @@ type JWTManager struct {
 
 type Claims struct {
 	jwt.RegisteredClaims
-	GUID           string   `json:"guid,omitempty"`
-	Name           string   `json:"name,omitempty"`
-	Email          string   `json:"email,omitempty"`
-	Department     string   `json:"department,omitempty"`
-	Company        string   `json:"company,omitempty"`
-	JobTitle       string   `json:"job_title,omitempty"`
+	GUID       string `json:"guid,omitempty"`
+	Name       string `json:"name,omitempty"`
+	Email      string `json:"email,omitempty"`
+	Department string `json:"department,omitempty"`
+	Company    string `json:"company,omitempty"`
+	JobTitle   string `json:"job_title,omitempty"`
 	// SAMAccountName is the authoritative AD sAMAccountName, captured at auth
 	// time from the LDAP search result. Stable across email/UPN/display-name
 	// changes. Apps doing authn-only should key their authz table on this
@@ -194,7 +194,7 @@ func (m *JWTManager) ValidateToken(tokenString string) (*Claims, error) {
 			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
 		}
 		return m.publicKey, nil
-	})
+	}, jwt.WithExpirationRequired()) // fail closed: a token without exp is invalid
 	if err != nil {
 		return nil, err
 	}

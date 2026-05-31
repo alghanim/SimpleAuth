@@ -5,13 +5,13 @@ import "time"
 // --- Data Types ---
 
 type User struct {
-	GUID         string    `json:"guid"`
-	PasswordHash string    `json:"password_hash,omitempty"`
-	DisplayName  string    `json:"display_name"`
-	Email        string    `json:"email"`
-	Department   string    `json:"department,omitempty"`
-	Company      string    `json:"company,omitempty"`
-	JobTitle     string    `json:"job_title,omitempty"`
+	GUID         string `json:"guid"`
+	PasswordHash string `json:"password_hash,omitempty"`
+	DisplayName  string `json:"display_name"`
+	Email        string `json:"email"`
+	Department   string `json:"department,omitempty"`
+	Company      string `json:"company,omitempty"`
+	JobTitle     string `json:"job_title,omitempty"`
 	// SAMAccountName is the authoritative AD sAMAccountName, populated on every
 	// successful LDAP or Kerberos authentication. Stable across UPN/email/
 	// display-name changes in AD. Apps doing authn-only should key their
@@ -52,14 +52,18 @@ type AppAuthz struct {
 }
 
 type LDAPConfig struct {
-	URL             string    `json:"url"`
-	BaseDN          string    `json:"base_dn"`
-	BindDN          string    `json:"bind_dn"`
-	BindPassword    string    `json:"bind_password"`
-	UsernameAttr    string    `json:"username_attr"`
-	CustomFilter    string    `json:"custom_filter,omitempty"`
-	UseTLS          bool      `json:"use_tls"`
-	SkipTLSVerify   bool      `json:"skip_tls_verify"`
+	URL           string `json:"url"`
+	BaseDN        string `json:"base_dn"`
+	BindDN        string `json:"bind_dn"`
+	BindPassword  string `json:"bind_password"`
+	UsernameAttr  string `json:"username_attr"`
+	CustomFilter  string `json:"custom_filter,omitempty"`
+	UseTLS        bool   `json:"use_tls"`
+	SkipTLSVerify bool   `json:"skip_tls_verify"`
+	// AllowInsecure permits binds over a cleartext ldap:// connection that could
+	// not be upgraded with StartTLS. Default false: ldap:// is StartTLS-upgraded
+	// and fails closed, so bind/user passwords are never sent in the clear.
+	AllowInsecure   bool      `json:"allow_insecure,omitempty"`
 	DisplayNameAttr string    `json:"display_name_attr"`
 	EmailAttr       string    `json:"email_attr"`
 	DepartmentAttr  string    `json:"department_attr"`
@@ -133,12 +137,12 @@ type AuditQuery struct {
 }
 
 type OIDCAuthCode struct {
-	Code        string    `json:"code"`
-	UserGUID    string    `json:"user_guid"`
-	AppID       string    `json:"app_id,omitempty"` // resolved from client_id at authorize (v2)
-	RedirectURI string    `json:"redirect_uri"`
-	Scope       string    `json:"scope"`
-	Nonce       string    `json:"nonce"`
+	Code        string `json:"code"`
+	UserGUID    string `json:"user_guid"`
+	AppID       string `json:"app_id,omitempty"` // resolved from client_id at authorize (v2)
+	RedirectURI string `json:"redirect_uri"`
+	Scope       string `json:"scope"`
+	Nonce       string `json:"nonce"`
 	// PKCE (RFC 7636) — set when the client supplied a code_challenge on the
 	// authorize request. When present, the token exchange must present a
 	// matching code_verifier.
@@ -150,12 +154,12 @@ type OIDCAuthCode struct {
 
 // DatabaseInfo holds stats about the active database backend.
 type DatabaseInfo struct {
-	Backend         string      `json:"backend"`          // "boltdb" or "postgres"
+	Backend         string      `json:"backend"` // "boltdb" or "postgres"
 	SizeMB          float64     `json:"size_mb"`
 	Tables          int         `json:"tables"`
 	TotalRows       int64       `json:"total_rows"`
 	TableDetails    []TableInfo `json:"table_details"`
-	Health          string      `json:"health"`           // "healthy", "degraded", "error"
+	Health          string      `json:"health"` // "healthy", "degraded", "error"
 	Version         string      `json:"version,omitempty"`
 	MaxConnections  int         `json:"max_connections,omitempty"`
 	OpenConnections int         `json:"open_connections,omitempty"`

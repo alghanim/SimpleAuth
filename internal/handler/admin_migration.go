@@ -73,7 +73,7 @@ func (h *Handler) handleMigrateTest(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleMigrateStart(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		PostgresURL string `json:"postgres_url"` // required for bolt→pg
-		Direction   string `json:"direction"`     // "to_postgres" (default) or "to_boltdb"
+		Direction   string `json:"direction"`    // "to_postgres" (default) or "to_boltdb"
 	}
 	if err := readJSON(r, &req); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
@@ -204,7 +204,7 @@ func (h *Handler) handleMigrateStatus(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleSwitchBackend(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Backend     string `json:"backend"`      // "boltdb" or "postgres"
-		PostgresURL string `json:"postgres_url"`  // required when backend=postgres
+		PostgresURL string `json:"postgres_url"` // required when backend=postgres
 	}
 	if err := readJSON(r, &req); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)

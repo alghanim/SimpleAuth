@@ -13,7 +13,7 @@ import (
 // This lives outside the DB so it can be read before opening any store.
 type DBConfig struct {
 	Backend     string `json:"backend"`      // "boltdb" or "postgres"
-	PostgresURL string `json:"postgres_url"`  // connection string (only when backend=postgres)
+	PostgresURL string `json:"postgres_url"` // connection string (only when backend=postgres)
 }
 
 // DBConfigPath returns the path to db.json in the data directory.

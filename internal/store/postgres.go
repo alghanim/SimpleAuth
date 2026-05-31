@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/google/uuid"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 // PostgresStore implements the Store interface using PostgreSQL.
@@ -135,7 +135,7 @@ func (s *PostgresStore) GetApp(appID string) (*App, error) {
 	var data []byte
 	err := s.db.QueryRow(`SELECT data FROM sa_apps WHERE app_id = $1`, appID).Scan(&data)
 	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("app not found")
+		return nil, ErrAppNotFound
 	}
 	if err != nil {
 		return nil, err
@@ -730,26 +730,11 @@ func (s *PostgresStore) ConsumeRefreshToken(tokenID string) (*RefreshToken, erro
 }
 
 func (s *PostgresStore) RevokeTokenFamily(familyID string) error {
-	rows, err := s.db.Query(`SELECT data FROM sa_refresh_tokens`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	var toDelete []string
-	for rows.Next() {
-		var data []byte
-		if err := rows.Scan(&data); err != nil {
-			continue
-		}
-		var rt RefreshToken
-		if json.Unmarshal(data, &rt) == nil && rt.FamilyID == familyID {
-			toDelete = append(toDelete, rt.TokenID)
-		}
-	}
-	for _, id := range toDelete {
-		s.db.Exec(`DELETE FROM sa_refresh_tokens WHERE token_id = $1`, id)
-	}
-	return nil
+	// Single atomic statement that surfaces failure: the old scan-then-loop
+	// discarded every per-row DELETE error and always returned nil, so a
+	// token-replay family revocation could silently fail (fail-open).
+	_, err := s.db.Exec(`DELETE FROM sa_refresh_tokens WHERE data->>'family_id' = $1`, familyID)
+	return err
 }
 
 func (s *PostgresStore) ListUserSessions(userGUID string) ([]*RefreshToken, error) {
@@ -774,26 +759,21 @@ func (s *PostgresStore) ListUserSessions(userGUID string) ([]*RefreshToken, erro
 }
 
 func (s *PostgresStore) RevokeUserTokens(userGUID string) error {
-	rows, err := s.db.Query(`SELECT data FROM sa_refresh_tokens`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	var toDelete []string
-	for rows.Next() {
-		var data []byte
-		if err := rows.Scan(&data); err != nil {
-			continue
-		}
-		var rt RefreshToken
-		if json.Unmarshal(data, &rt) == nil && rt.UserGUID == userGUID {
-			toDelete = append(toDelete, rt.TokenID)
-		}
-	}
-	for _, id := range toDelete {
-		s.db.Exec(`DELETE FROM sa_refresh_tokens WHERE token_id = $1`, id)
-	}
-	return nil
+	// Single atomic statement that surfaces failure (see RevokeTokenFamily).
+	// Admin "disable user / log out everywhere" relies on this not failing open.
+	_, err := s.db.Exec(`DELETE FROM sa_refresh_tokens WHERE data->>'user_guid' = $1`, userGUID)
+	return err
+}
+
+func (s *PostgresStore) CleanExpiredOIDCCodes() error {
+	_, err := s.db.Exec(`DELETE FROM sa_oidc_auth_codes WHERE (data->>'expires_at')::timestamptz < now()`)
+	return err
+}
+
+func (s *PostgresStore) CleanExpiredRefreshTokens() error {
+	// expires_at is stored inside the JSON data column as an RFC3339 timestamp.
+	_, err := s.db.Exec(`DELETE FROM sa_refresh_tokens WHERE (data->>'expires_at')::timestamptz < now()`)
+	return err
 }
 
 // --- Audit Log ---
@@ -831,13 +811,27 @@ func (s *PostgresStore) QueryAuditLog(q AuditQuery) ([]*AuditEntry, error) {
 		args = append(args, q.To)
 		argN++
 	}
+	// Push Event/Actor filters into SQL so LIMIT/OFFSET apply to already-filtered
+	// rows. The old code fetched Limit+Offset+100 rows and filtered in Go, which
+	// silently dropped matching records whenever the filter out-ran that window.
+	if q.Event != "" {
+		conditions = append(conditions, fmt.Sprintf("data->>'event' = $%d", argN))
+		args = append(args, q.Event)
+		argN++
+	}
+	if q.UserID != "" {
+		conditions = append(conditions, fmt.Sprintf("data->>'actor' = $%d", argN))
+		args = append(args, q.UserID)
+		argN++
+	}
 
 	query := `SELECT data FROM sa_audit_log`
 	if len(conditions) > 0 {
 		query += " WHERE " + strings.Join(conditions, " AND ")
 	}
 	query += " ORDER BY timestamp DESC"
-	query += fmt.Sprintf(" LIMIT %d OFFSET %d", q.Limit+q.Offset+100, 0) // fetch extra for filtering
+	query += fmt.Sprintf(" LIMIT $%d OFFSET $%d", argN, argN+1)
+	args = append(args, q.Limit, q.Offset)
 
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
@@ -846,7 +840,6 @@ func (s *PostgresStore) QueryAuditLog(q AuditQuery) ([]*AuditEntry, error) {
 	defer rows.Close()
 
 	var entries []*AuditEntry
-	skipped := 0
 	for rows.Next() {
 		var data []byte
 		if err := rows.Scan(&data); err != nil {
@@ -856,20 +849,7 @@ func (s *PostgresStore) QueryAuditLog(q AuditQuery) ([]*AuditEntry, error) {
 		if err := json.Unmarshal(data, &entry); err != nil {
 			continue
 		}
-		if q.Event != "" && entry.Event != q.Event {
-			continue
-		}
-		if q.UserID != "" && entry.Actor != q.UserID {
-			continue
-		}
-		if skipped < q.Offset {
-			skipped++
-			continue
-		}
 		entries = append(entries, &entry)
-		if len(entries) >= q.Limit {
-			break
-		}
 	}
 	return entries, rows.Err()
 }
@@ -907,7 +887,9 @@ func (s *PostgresStore) MergeUsers(sourceGUIDs []string, displayName, email stri
 
 	for _, srcGUID := range sourceGUIDs {
 		// Move identity mappings
-		tx.Exec(`UPDATE sa_identity_mappings SET user_guid = $1 WHERE user_guid = $2`, newUser.GUID, srcGUID)
+		if _, err := tx.Exec(`UPDATE sa_identity_mappings SET user_guid = $1 WHERE user_guid = $2`, newUser.GUID, srcGUID); err != nil {
+			return nil, fmt.Errorf("merge: reassign identity mappings for %s: %w", srcGUID, err)
+		}
 
 		// Collect roles
 		var rolesData []byte
@@ -918,7 +900,9 @@ func (s *PostgresStore) MergeUsers(sourceGUIDs []string, displayName, email stri
 				allRoles[r] = true
 			}
 		}
-		tx.Exec(`DELETE FROM sa_user_roles WHERE guid = $1`, srcGUID)
+		if _, err := tx.Exec(`DELETE FROM sa_user_roles WHERE guid = $1`, srcGUID); err != nil {
+			return nil, fmt.Errorf("merge: delete source roles for %s: %w", srcGUID, err)
+		}
 
 		// Collect permissions
 		var permsData []byte
@@ -929,7 +913,9 @@ func (s *PostgresStore) MergeUsers(sourceGUIDs []string, displayName, email stri
 				allPerms[p] = true
 			}
 		}
-		tx.Exec(`DELETE FROM sa_user_permissions WHERE guid = $1`, srcGUID)
+		if _, err := tx.Exec(`DELETE FROM sa_user_permissions WHERE guid = $1`, srcGUID); err != nil {
+			return nil, fmt.Errorf("merge: delete source permissions for %s: %w", srcGUID, err)
+		}
 
 		// Mark source as merged
 		var srcData []byte
@@ -938,7 +924,9 @@ func (s *PostgresStore) MergeUsers(sourceGUIDs []string, displayName, email stri
 			json.Unmarshal(srcData, &srcUser)
 			srcUser.MergedInto = newUser.GUID
 			mergedData, _ := json.Marshal(&srcUser)
-			tx.Exec(`UPDATE sa_users SET data = $1 WHERE guid = $2`, mergedData, srcGUID)
+			if _, err := tx.Exec(`UPDATE sa_users SET data = $1 WHERE guid = $2`, mergedData, srcGUID); err != nil {
+				return nil, fmt.Errorf("merge: mark source %s merged: %w", srcGUID, err)
+			}
 		}
 	}
 
@@ -949,7 +937,9 @@ func (s *PostgresStore) MergeUsers(sourceGUIDs []string, displayName, email stri
 			roles = append(roles, r)
 		}
 		data, _ := json.Marshal(roles)
-		tx.Exec(`INSERT INTO sa_user_roles (guid, roles) VALUES ($1, $2)`, newUser.GUID, data)
+		if _, err := tx.Exec(`INSERT INTO sa_user_roles (guid, roles) VALUES ($1, $2)`, newUser.GUID, data); err != nil {
+			return nil, fmt.Errorf("merge: write merged roles: %w", err)
+		}
 	}
 	if len(allPerms) > 0 {
 		var perms []string
@@ -957,7 +947,9 @@ func (s *PostgresStore) MergeUsers(sourceGUIDs []string, displayName, email stri
 			perms = append(perms, p)
 		}
 		data, _ := json.Marshal(perms)
-		tx.Exec(`INSERT INTO sa_user_permissions (guid, permissions) VALUES ($1, $2)`, newUser.GUID, data)
+		if _, err := tx.Exec(`INSERT INTO sa_user_permissions (guid, permissions) VALUES ($1, $2)`, newUser.GUID, data); err != nil {
+			return nil, fmt.Errorf("merge: write merged permissions: %w", err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {

@@ -129,9 +129,13 @@ func (h *Handler) handleSetupKerberos(w http.ResponseWriter, r *http.Request) {
 		spnWarning = fmt.Sprintf("could not auto-register SPN (run manually: setspn -A %s %s): %v", spn, samAccountName, err)
 	}
 
-	// Generate keytab
+	// Generate keytab. Only AES256/AES128 (enctypes 18/17) — RC4-HMAC (23) is
+	// deliberately omitted. With RC4 present, an AES salt mismatch against AD
+	// would silently fall back to verifying SPNEGO on deprecated RC4; without it,
+	// a salt mismatch fails loudly so the operator supplies a correct salt or
+	// imports an AD-exported keytab (F-kerberos-RC4).
 	kt := keytab.New()
-	for _, encType := range []int32{18, 17, 23} {
+	for _, encType := range []int32{18, 17} {
 		if err := kt.AddEntry(samAccountName, realm, p.BindPassword, time.Now(), 0, encType); err != nil {
 			continue
 		}

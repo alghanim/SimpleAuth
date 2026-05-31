@@ -15,6 +15,17 @@ import (
 // never scoped to a parent domain.
 const sessionCookieName = "__sa_sso"
 
+// sessionCookiePath returns the path the SSO cookie is scoped to: the configured
+// BasePath when set, else "/". Issue, resolve-refresh, and clear must all use the
+// same value so the browser sends it on SimpleAuth's routes and a later clear
+// (matching Path) actually deletes it (F66).
+func (h *Handler) sessionCookiePath() string {
+	if h.cfg.BasePath != "" {
+		return h.cfg.BasePath
+	}
+	return "/"
+}
+
 // issueSessionCookie creates a new SSO session in the store and sets the cookie.
 // No-op when EnableSessionSSO is false.
 // The caller should invoke this on successful login (hosted, SSO, OIDC flows).
@@ -60,7 +71,7 @@ func (h *Handler) issueSessionCookie(w http.ResponseWriter, r *http.Request, use
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    id,
-		Path:     "/",
+		Path:     h.sessionCookiePath(),
 		HttpOnly: true,
 		Secure:   secure,
 		SameSite: sameSite,
@@ -132,7 +143,7 @@ func (h *Handler) resolveSessionCookie(w http.ResponseWriter, r *http.Request) s
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    s.ID,
-		Path:     "/",
+		Path:     h.sessionCookiePath(),
 		HttpOnly: true,
 		Secure:   secure,
 		SameSite: sameSite,
@@ -148,7 +159,7 @@ func (h *Handler) clearSessionCookie(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    "",
-		Path:     "/",
+		Path:     h.sessionCookiePath(),
 		HttpOnly: true,
 		Secure:   !h.cfg.TLSDisabled,
 		SameSite: http.SameSiteLaxMode,

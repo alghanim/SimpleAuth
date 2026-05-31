@@ -2,8 +2,9 @@ package handler
 
 import "testing"
 
-// TestVerifyPKCE covers the S256 + plain PKCE verification added with the
-// authorization-code hardening (M6). The S256 vector is from RFC 7636 App. B.
+// TestVerifyPKCE covers S256 PKCE verification (M6). Only S256 is supported and
+// advertised; "plain"/empty are rejected as a downgrade (F55). The S256 vector
+// is from RFC 7636 App. B.
 func TestVerifyPKCE(t *testing.T) {
 	const verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
 	const challenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
@@ -17,11 +18,13 @@ func TestVerifyPKCE(t *testing.T) {
 	if verifyPKCE("", challenge, "S256") {
 		t.Fatal("empty verifier accepted")
 	}
-	if !verifyPKCE("abc123", "abc123", "plain") {
-		t.Fatal("valid plain verifier rejected")
+	// "plain" and the empty default method are a downgrade and must be rejected
+	// even when the verifier matches the challenge (F55).
+	if verifyPKCE("abc123", "abc123", "plain") {
+		t.Fatal("plain method accepted (downgrade must be rejected)")
 	}
-	if verifyPKCE("abc123", "different", "") {
-		t.Fatal("mismatched plain verifier accepted")
+	if verifyPKCE("abc123", "abc123", "") {
+		t.Fatal("empty method accepted (downgrade must be rejected)")
 	}
 	if verifyPKCE(verifier, challenge, "unknown-method") {
 		t.Fatal("unknown method accepted")

@@ -130,6 +130,13 @@ type Client struct {
 	keys    map[string]*rsa.PublicKey
 	keysAt  time.Time
 	keysTTL time.Duration
+
+	// lastFetch / minRefetch bound how often an (unauthenticated) cache miss
+	// can trigger an outbound JWKS fetch, so a flood of tokens carrying
+	// unknown/attacker-chosen kids cannot amplify into a flood of backend
+	// JWKS requests.
+	lastFetch  time.Time
+	minRefetch time.Duration
 }
 
 // New creates a new SimpleAuth client with the given options.
@@ -149,6 +156,7 @@ func New(opts Options) *Client {
 		audience:       opts.Audience,
 		keys:           make(map[string]*rsa.PublicKey),
 		keysTTL:        1 * time.Hour,
+		minRefetch:     30 * time.Second,
 	}
 }
 
@@ -574,6 +582,10 @@ func (c *Client) certsURL() string {
 }
 
 func (c *Client) fetchJWKS() error {
+	c.mu.Lock()
+	c.lastFetch = time.Now()
+	c.mu.Unlock()
+
 	resp, err := c.http.Get(c.certsURL())
 	if err != nil {
 		return fmt.Errorf("simpleauth: fetch JWKS: %w", err)
@@ -630,17 +642,34 @@ func parseRSAPublicKey(nB64, eB64 string) (*rsa.PublicKey, error) {
 
 // getKey returns the RSA public key for the given kid. It uses the cache when
 // possible and re-fetches from the JWKS endpoint on cache miss or expiry.
+//
+// getKey runs on attacker-controlled input (the token's kid) BEFORE the
+// signature is verified, so cache misses must not translate one-to-one into
+// outbound JWKS fetches. A re-fetch is therefore only attempted at most once
+// per minRefetch window; within that window an unknown kid fails fast against
+// the existing cache instead of triggering another fetch. This bounds the
+// fetch-amplification a flood of unknown-kid tokens can cause.
 func (c *Client) getKey(kid string) (*rsa.PublicKey, error) {
 	c.mu.RLock()
 	key, ok := c.keys[kid]
 	expired := time.Since(c.keysAt) > c.keysTTL
+	throttled := time.Since(c.lastFetch) < c.minRefetch
 	c.mu.RUnlock()
 
 	if ok && !expired {
 		return key, nil
 	}
 
-	// Cache miss or expired — re-fetch.
+	// Cache miss or expired. Only re-fetch if we have not fetched too recently;
+	// otherwise serve from (or fail against) the current cache so a stream of
+	// unknown kids cannot amplify into a stream of JWKS fetches.
+	if throttled {
+		if ok {
+			return key, nil
+		}
+		return nil, fmt.Errorf("simpleauth: unknown signing key kid=%s", kid)
+	}
+
 	if err := c.fetchJWKS(); err != nil {
 		return nil, err
 	}
@@ -717,15 +746,25 @@ func (c *Client) Verify(tokenString string) (*User, error) {
 		Iss      string      `json:"iss"`
 		Aud      audience    `json:"aud"`
 		FamilyID string      `json:"family_id"`
+		Typ      string      `json:"typ"`
 	}
 	if err := json.Unmarshal(payloadJSON, &claims); err != nil {
 		return nil, fmt.Errorf("simpleauth: decode JWT claims: %w", err)
 	}
 
-	// Reject refresh tokens presented as access tokens: they are RS256-signed
-	// by the same key but carry a family_id and no authorization claims.
+	// Reject non-access token classes. The server signs several token classes
+	// with the same key, distinguished by claims: access tokens carry no
+	// family_id and either no typ (direct-login) or typ="Bearer" (OIDC and
+	// client_credentials service tokens); refresh tokens carry a family_id; OIDC
+	// ID tokens carry typ="ID"; app-management tokens carry typ="app-mgmt".
+	// Reject refresh/ID/app-mgmt so none of those can be replayed as a bearer
+	// credential for resource access, while still accepting both access-token
+	// shapes ("" and "Bearer").
 	if claims.FamilyID != "" {
 		return nil, errors.New("simpleauth: refresh token is not valid for resource access")
+	}
+	if claims.Typ == "ID" || claims.Typ == "app-mgmt" {
+		return nil, fmt.Errorf("simpleauth: token type %q is not a user access token", claims.Typ)
 	}
 
 	// Expiration is mandatory — fail closed if the claim is absent or unparseable.

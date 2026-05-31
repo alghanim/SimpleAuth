@@ -2,6 +2,7 @@ package handler
 
 import (
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -166,6 +167,18 @@ func (h *Handler) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var rs store.RuntimeSettings
 	if err := readJSON(r, &rs); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Guard security-relevant fields: a settings PUT must never silently weaken
+	// the password policy or enable wildcard CORS (F25). Because these values are
+	// read LIVE to enforce security and the UI does a full-document GET-then-PUT,
+	// an omitted/zeroed field would otherwise disable a control.
+	if rs.PasswordMinLength < 8 {
+		rs.PasswordMinLength = 8 // hard floor; weaker policies are not supported
+	}
+	if strings.TrimSpace(rs.CORSOrigins) == "*" {
+		jsonError(w, "cors_origins cannot be '*' — list explicit origins", http.StatusBadRequest)
 		return
 	}
 

@@ -75,6 +75,54 @@ source of truth for what is currently open vs. fixed.
 | L4 | `rotate-secret` does not revoke outstanding app-management tokens | LOW | FIXED | 2026-05-31 (branch `v2`) |
 | L5 | App-id enumeration via bcrypt timing oracle | LOW | FIXED | 2026-05-31 (branch `v2`) |
 | I3 | Group-derived roles inherently stale on refresh (no directory re-read) | INFO | WONTFIX | by design — see Pass 2 remediation note |
+| H3 | (regressed) PG→Bolt migration leaves stale sessions/revocation blacklist | HIGH | FIXED | 2026-06-01 (Pass 3) |
+| M8 | (regressed) Frame protection only on admin UI → clickjacking of login/OIDC | MEDIUM | FIXED | 2026-06-01 (Pass 3) |
+| L1 | (regressed) Hosted-login SSO redirect validated vs global, not per-app | MEDIUM | FIXED | 2026-06-01 (Pass 3) |
+| H9 | Refresh/ID tokens accepted as access tokens at user-resource boundaries | HIGH | FIXED | 2026-06-01 (Pass 3) |
+| H10 | LDAP bind + user passwords sent in cleartext over `ldap://` (no StartTLS) | HIGH | FIXED | 2026-06-01 (Pass 3) |
+| H11 | `secret.key` silently overwritten on any read error → loses encrypted secrets | HIGH | FIXED | 2026-06-01 (Pass 3) |
+| H12 | `RevokeUserTokens`/`RevokeTokenFamily` drop DELETE errors → fail-open revocation | HIGH | FIXED | 2026-06-01 (Pass 3) |
+| S4 | Go SDK `Verify` accepts `typ=app-mgmt`/`typ=ID` tokens as access tokens | MEDIUM | FIXED | 2026-06-01 (Pass 3) |
+| S5 | Python SDK `verify` accepts refresh tokens as access tokens | MEDIUM | FIXED | 2026-06-01 (Pass 3) |
+| S6 | JS/.NET SDKs accept ID tokens as access; .NET threw non-SDK exception | MEDIUM | FIXED | 2026-06-01 (Pass 3) |
+| M17 | HTTP server has no read/header/write timeouts → Slowloris DoS | MEDIUM | FIXED | 2026-06-01 (Pass 3) |
+| M18 | OIDC end-session is an unauthenticated open redirect (`post_logout_redirect_uri`) | MEDIUM | FIXED | 2026-06-01 (Pass 3) |
+| M19 | OIDC authorize POST has no CSRF protection (login CSRF / session fixation) | MEDIUM | FIXED | 2026-06-01 (Pass 3) |
+| M20 | OIDC logout kills sessions on any token type, not just an ID token | MEDIUM | FIXED | 2026-06-01 (Pass 3) |
+| M21 | OIDC `client_credentials` app-secret brute-force unthrottled | MEDIUM | FIXED | 2026-06-01 (Pass 3) |
+| M22 | OIDC issuer / discovery / jwks_uri spoofable via the `Host` header | MEDIUM | FIXED | 2026-06-01 (Pass 3) |
+| M23 | Empty `redirect_uri` in auth-code flow delivered to the GLOBAL default URI | MEDIUM | FIXED | 2026-06-01 (Pass 3) |
+| M24 | `resolveApp` fails open for the default app on any store error (adjacent to H6) | MEDIUM | FIXED | 2026-06-01 (Pass 3) |
+| M25 | Admin settings mass-assignment silently weakens password policy / lockout / CORS | MEDIUM | FIXED | 2026-06-01 (Pass 3) |
+| M26 | Destructive admin actions (delete user, DB restore) write no audit entry | MEDIUM | FIXED | 2026-06-01 (Pass 3) |
+| M27 | Admin delete-user leaves access tokens valid + orphans SSO sessions | MEDIUM | FIXED | 2026-06-01 (Pass 3) |
+| M28 | `BoltStore.Restore` swaps the live `*bolt.DB` with no synchronization (data race) | MEDIUM | FIXED | 2026-06-01 (Pass 3) |
+| M29 | Refresh tokens never pruned — unbounded growth | MEDIUM | FIXED | 2026-06-01 (Pass 3) |
+| M30 | Postgres `QueryAuditLog` filters after SQL `LIMIT` → silently drops records | MEDIUM | FIXED | 2026-06-01 (Pass 3) |
+| M31 | Kerberos client realm never validated → cross-realm identity hijack | MEDIUM | FIXED | 2026-06-01 (Pass 3) |
+| M32 | Kerberos keytab includes RC4-HMAC → silent downgrade on AES salt mismatch | MEDIUM | FIXED | 2026-06-01 (Pass 3) |
+| M33 | Hosted-login empty-credential branch is an open redirect | MEDIUM | FIXED | 2026-06-01 (Pass 3) |
+| M34 | Restart loop leaks the pruner goroutine against the closed old store | MEDIUM | FIXED | 2026-06-01 (Pass 3) |
+| M35 | Auto-generated admin key printed to logs + regenerated every restart | MEDIUM | FIXED | 2026-06-01 (Pass 3) |
+| M36 | Container/CI hardening: EOL base image, host-exposed plaintext, root nginx, unpinned actions | MEDIUM | FIXED | 2026-06-01 (Pass 3) |
+| M37 | LDAP group-CN parsing only strips uppercase `CN=` → broken role mapping | MEDIUM | FIXED | 2026-06-01 (Pass 3) |
+| L6 | `ValidateToken` did not require `exp` (missing-`exp` token validated) | LOW | FIXED | 2026-06-01 (Pass 3) |
+| L7 | PKCE accepted `plain`/empty downgrade though discovery advertises only S256 | LOW | FIXED | 2026-06-01 (Pass 3) |
+| L8 | Impersonation issued a token for a disabled / access-revoked target | LOW | FIXED | 2026-06-01 (Pass 3) |
+| L9 | CORS `*` reflected an arbitrary request `Origin` instead of literal `*` | LOW | FIXED | 2026-06-01 (Pass 3) |
+| L10 | `data_dir` MkdirAll error ignored | LOW | FIXED | 2026-06-01 (Pass 3) |
+| L11 | `MergeUsers` ignored errors on reassignment/updates → partial/corrupt merge | LOW | FIXED | 2026-06-01 (Pass 3) |
+| L12 | Abandoned OIDC auth codes never cleaned — unbounded growth | LOW | FIXED | 2026-06-01 (Pass 3) |
+| L13 | SSO session cookie scoped to `/` instead of `BasePath` | LOW | FIXED | 2026-06-01 (Pass 3) |
+| L14 | JWKS SDKs performed unbounded upstream fetch per unknown `kid` (DoS amplification) | LOW | FIXED | 2026-06-01 (Pass 3) |
+| L15 | Canonical Go example modeled insecure verification (`Audience`/issuer unset) | LOW | FIXED | 2026-06-01 (Pass 3) |
+| L16 | Python JWKS accepted RSA keys of any modulus (no min key length) | LOW | FIXED | 2026-06-01 (Pass 3) |
+| L17 | Express example wired admin-only route to a client with no admin key | LOW | FIXED | 2026-06-01 (Pass 3) |
+| L18 | `.well-known` discovery checklist omitted `secret.key` backup + NTP | LOW | FIXED | 2026-06-01 (Pass 3) |
+| L19 | `test-negotiate` test page not rate-limited (gated behind flag, default off) | LOW | OPEN | acknowledged — see Pass 3 deferred |
+| L20 | `Retry-After` only emitted on `POST /login` 429, not other 429 responses | LOW | OPEN | acknowledged — see Pass 3 deferred |
+| L21 | Several LDAP lookups hardcode `sAMAccountName`, ignoring `UsernameAttr` | LOW | OPEN | acknowledged — see Pass 3 deferred |
+| L22 | `RateLimitMax`/`WindowS` settable via API but not applied to live limiter | LOW | OPEN | acknowledged — see Pass 3 deferred |
 
 ---
 
@@ -672,4 +720,94 @@ access-token TTL, and **M13** now guarantees the next interactive login reconcil
 set (including clearing all groups). Operators who need immediate revocation should use
 the access-revocation kill switch (`IsUserAccessRevoked`, honored on refresh per M3) or
 a short access-token TTL. Revisit if a directory-change webhook/poll is added.
+
+---
+
+## Audit Pass 3 — 2026-06-01 — Claude Opus 4.8 (`claude-opus-4-8`, 1M)
+
+Scope: full re-audit of the whole repo (server `internal/`, `pkg/`, all four SDKs,
+examples, infra/CI, docs) **plus remediation in the same pass**. Method: an 18-dimension
+multi-agent review (92 sub-agents) with every finding adversarially re-verified against the
+cited code, cross-checked by static analysis (`go vet`, `gosec`, `staticcheck`,
+`govulncheck`) and first-hand reading of all HIGH findings. After triage, 73 findings were
+confirmed (1 candidate rejected as a false positive — a claimed empty-password LDAP bind
+that `go-ldap` v3.4.13 already fails closed on). Baseline before and after: `go build`,
+`go vet`, `gofmt`, `go test ./... -race` all clean; `govulncheck` reports 0 called
+vulnerabilities; `staticcheck` clean.
+
+Most findings were remediated this pass. The three **regressions / incomplete prior fixes**
+below are referenced by their original IDs; genuinely new issues take new IDs.
+
+### Regressions / incomplete prior fixes
+- **H3 (regressed direction).** `MigrateFromPostgres` reused the existing `auth.db` data dir
+  without clearing it and skipped verification for any table the source had 0 rows for, so
+  stale users / SSO sessions / **revoked-token + revoked-user blacklists** from a prior BoltDB
+  era could resurface — making revoked credentials valid again. Fixed: target buckets are now
+  wiped (DeleteBucket+CreateBucket) before copy, and verification runs even for 0-row tables.
+- **M8 (incomplete).** The Pass 1 baseline headers omitted frame protection, so only the admin
+  UI was clickjacking-protected. `X-Frame-Options: DENY` + `Content-Security-Policy:
+  frame-ancestors 'none'` are now part of the global baseline.
+- **L1 (sibling endpoint).** The hosted-login (`GET /login`) session-SSO fast path validated
+  `redirect_uri` against the **global** allowlist, then minted a token for the
+  attacker-supplied `client_id`'s audience and delivered it there. Now validated against the
+  resolved app's own allowlist up front and again inside `completeHostedLoginWithSession`.
+
+### New HIGH findings (all FIXED)
+- **H9 — Refresh/ID tokens accepted as access tokens.** `validateAccessToken` gated only
+  `typ=="app-mgmt"`; refresh tokens (same key, marked only by `family_id`) and OIDC id_tokens
+  (`typ="ID"`) passed it, authenticating at `/userinfo`, OIDC userinfo / introspection, and
+  `/reset-password`. Fixed by rejecting `family_id != ""` and `typ=="ID"` there; `ValidateToken`
+  now also requires `exp` (L6). The SDKs got the matching client-side gate (S4/S5/S6).
+- **H10 — LDAP cleartext binds.** `LDAPConnect` only used TLS for `ldaps://`; plain `ldap://`
+  sent the service-account and end-user passwords in the clear. Now `ldap://` is
+  StartTLS-upgraded and **fails closed** unless the operator sets the new `allow_insecure`
+  opt-out. (The search filter already used `ldap.EscapeFilter`, so no LDAP injection exists.)
+- **H11 — `secret.key` overwrite.** `loadOrCreateSecretKey` treated *any* read error as
+  "create new key" and overwrote the file, permanently destroying decryption of stored LDAP
+  bind passwords. Now guarded with `errors.Is(err, os.ErrNotExist)`.
+- **H12 — Fail-open revocation.** `RevokeUserTokens`/`RevokeTokenFamily` (Postgres) discarded
+  every per-row DELETE error and always returned `nil`, so "disable user / log out everywhere"
+  could report success while tokens survived. Replaced with single atomic parameterized DELETEs
+  that surface errors.
+
+### New MEDIUM findings (all FIXED)
+M17 HTTP server timeouts (closes Slowloris); M18 OIDC end-session open redirect (now validates
+`post_logout_redirect_uri` against the app allowlist); M19 OIDC authorize-POST CSRF; M20 OIDC
+logout requires a genuine `typ="ID"` token before revocation; M21 `client_credentials`
+IP-rate-limited; M22 `oidcBaseURL` pins the host on `Host`-header mismatch and only trusts
+`X-Forwarded-Proto` from a trusted proxy; M23 empty `redirect_uri` resolves from the app's own
+URIs, not the global default; M24 `resolveApp` fails closed on a real store error (new
+`ErrAppNotFound` sentinel); M25 settings PUT floors `password_min_length` at 8 and rejects
+`cors_origins="*"`; M26 delete-user + DB restore now audited; M27 delete-user revokes tokens +
+SSO sessions; M28 `BoltStore.Restore` serialized by `sync.RWMutex` (race-clean under `-race`);
+M29 expired refresh tokens pruned hourly; M30 Postgres audit filters pushed into SQL before
+`LIMIT`; M31 verified Kerberos principal bound to the configured realm; M32 keytab drops
+RC4-HMAC; M33 hosted-login error redirects re-validated; M34 restart loop tears down the pruner
+via a stop channel (also `pkg/server`); M35 admin key persisted to `<data_dir>/admin.key`
+(0600), path logged not the secret; M36 container/CI hardening (pinned non-EOL base, plaintext
+app un-published, unprivileged nginx, SHA-pinned least-privilege Actions, secure TLS defaults);
+M37 LDAP group-CN parsing case-insensitive.
+
+### New LOW findings (FIXED): L6–L18
+`exp` mandatory in `ValidateToken` (L6); PKCE rejects `plain`/empty (L7); impersonation rejects
+disabled/revoked targets (L8); CORS `*` emits literal `*` (L9); `data_dir` MkdirAll error
+surfaced (L10); `MergeUsers` rolls back on write errors (L11); abandoned OIDC auth codes pruned
+(L12); SSO cookie scoped to `BasePath` (L13); SDK JWKS unknown-`kid` refetch bounded (L14); the
+canonical Go example pins `Audience`/issuer (L15); the Python SDK rejects sub-2048-bit JWKS keys
+(L16); the Express example no longer wires an admin-only route to a key-less client (L17); the
+deployment checklist now covers `secret.key` backup, NTP, and the correct health path (L18).
+
+### Deferred (acknowledged, not yet fixed)
+- **L19** `GET /test-negotiate` is not rate-limited — but it is gated behind
+  `AUTH_ENABLE_TEST_ENDPOINTS` (default off), so it is not exposed in production.
+- **L20** `Retry-After` only on `POST /api/auth/login` 429s — cosmetic; throttling still applies.
+- **L21** Several LDAP lookups hardcode `sAMAccountName` instead of `UsernameAttr` — affects only
+  non-AD directories using a non-default username attribute.
+- **L22** Runtime `rate_limit_*` settings are persisted but applied only on restart.
+- **F51 (partial).** `ValidateToken` still does not pin `iss`/`aud` (only `exp` is now required):
+  intentional, because OIDC tokens legitimately carry Host-derived and per-app issuers/audiences
+  through the same validator — issuer/audience are enforced at the SDK/RP layer (the
+  `ExpectedIssuer`/`Audience` options) rather than centrally.
+
+These remain the standing OPEN items for the next pass.
 </content>

@@ -358,7 +358,25 @@ class SimpleAuth:
         return User.from_claims(claims)
 
     def _verify_claims(self, claims: Mapping[str, Any]) -> None:
-        """Validate exp (always) and issuer/audience (when configured)."""
+        """Validate token type, exp (always), and issuer/audience (when set)."""
+        # Reject non-access token classes. The server signs several token
+        # classes with the same key, distinguished by claims: access tokens
+        # carry no ``family_id`` and either no ``typ`` (direct-login) or
+        # ``typ="Bearer"`` (OIDC and client_credentials service tokens); refresh
+        # tokens carry a ``family_id``; OIDC ID tokens carry ``typ="ID"``;
+        # app-management tokens carry ``typ="app-mgmt"``. Reject refresh/ID/
+        # app-mgmt so none can be replayed as a bearer credential, while still
+        # accepting both access-token shapes ("" and "Bearer").
+        if claims.get("family_id"):
+            raise TokenVerificationError(
+                "refresh token presented as access token", status_code=401
+            )
+        typ = claims.get("typ")
+        if typ in ("ID", "app-mgmt"):
+            raise TokenVerificationError(
+                f"token type {typ!r} is not a user access token", status_code=401
+            )
+
         # exp is mandatory and must be a number. Fail closed on missing/bad exp.
         exp = claims.get("exp")
         if not isinstance(exp, (int, float)) or isinstance(exp, bool):

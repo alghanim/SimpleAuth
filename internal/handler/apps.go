@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 
@@ -28,7 +29,11 @@ func (h *Handler) resolveApp(clientID string) (*store.App, error) {
 	}
 	a, err := h.store.GetApp(id)
 	if err != nil {
-		if id == h.defaultAppID() {
+		// Only synthesize the transient default app when the row genuinely does
+		// not exist. A real store error (e.g. a DB outage) must fail closed rather
+		// than return a default app with RequireAssignment=false, which would
+		// silently drop a configured require_assignment (F26).
+		if errors.Is(err, store.ErrAppNotFound) && id == h.defaultAppID() {
 			return &store.App{AppID: id, Audience: id, RedirectURIs: h.cfg.RedirectURIs}, nil
 		}
 		return nil, fmt.Errorf("unknown app: %s", id)

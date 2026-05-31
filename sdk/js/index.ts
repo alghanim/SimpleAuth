@@ -399,6 +399,11 @@ class JWKSCache {
   private fetchedAt = 0;
   private fetching: Promise<void> | null = null;
   private readonly ttlMs = 60 * 60 * 1000; // 1 hour
+  // Minimum interval between network refreshes triggered by an unknown kid.
+  // The kid is attacker-controlled and read before signature verification, so
+  // without this cooldown a stream of tokens with random kids would force one
+  // upstream JWKS fetch per token (DoS amplification against the auth server).
+  private readonly unknownKidCooldownMs = 30 * 1000; // 30 seconds
   private readonly jwksUrl: string;
 
   constructor(jwksUrl: string) {
@@ -412,6 +417,13 @@ class JWKSCache {
 
     if (cached && now - this.fetchedAt < this.ttlMs) {
       return cached;
+    }
+
+    // Unknown kid: only hit the network if we haven't refreshed recently.
+    // Within the cooldown window, serve the not-found result from cache so a
+    // burst of bogus kids can't amplify into one upstream fetch per request.
+    if (!cached && now - this.fetchedAt < this.unknownKidCooldownMs) {
+      throw new SimpleAuthError(`JWKS: no key found for kid "${kid}"`, 401);
     }
 
     // Refresh if stale or kid not found
@@ -603,6 +615,15 @@ export class SimpleAuth {
     // same key but carry a family_id and no authorization claims.
     if (payload.family_id) {
       throw new SimpleAuthError('Refresh token is not valid for resource access', 401);
+    }
+
+    // Reject non-access token types. User access tokens carry no `typ`; OIDC ID
+    // tokens use typ="ID" and app-management tokens use typ="app-mgmt". All are
+    // signed by the same key, so without this check an id_token (which is
+    // exposed to the browser by design) could be replayed as a Bearer access
+    // token. verify() must only ever accept user access tokens.
+    if (payload.typ === 'ID' || payload.typ === 'app-mgmt') {
+      throw new SimpleAuthError('Token is not a user access token', 401);
     }
 
     // Expiration is mandatory — fail closed if the claim is absent.

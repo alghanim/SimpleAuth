@@ -50,8 +50,8 @@ type rateLimiter struct {
 }
 
 type ipCounter struct {
-	count    int
-	resetAt  time.Time
+	count   int
+	resetAt time.Time
 }
 
 func newRateLimiter(limit int, window time.Duration) *rateLimiter {

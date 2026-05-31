@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"simpleauth/internal/auth"
@@ -59,9 +61,7 @@ func runServer() (exit bool) {
 	}
 
 	if cfg.AdminKey == "" {
-		cfg.AdminKey = generateAdminKey()
-		log.Printf("No admin_key configured — generated temporary key: %s", cfg.AdminKey)
-		log.Printf("Set admin_key in config file or AUTH_ADMIN_KEY env var to make it permanent")
+		cfg.AdminKey = loadOrCreateAdminKey(cfg.DataDir)
 	}
 
 	// Open store (checks db.json → env postgres → BoltDB, with fallback)
@@ -96,8 +96,14 @@ func runServer() (exit bool) {
 	restartCh := make(chan struct{}, 1)
 	h.SetRestartChannel(restartCh)
 
+	// Background goroutines started below are torn down when this returns (on a
+	// graceful admin restart) so each restart does not leak a pruner goroutine
+	// still pointing at the now-closed store.
+	stop := make(chan struct{})
+	defer close(stop)
+
 	// Start audit log pruner
-	h.StartAuditPruner()
+	h.StartAuditPruner(stop)
 
 	log.Printf("SimpleAuth %s starting", Version)
 	log.Printf("Hostname: %s", cfg.Hostname)
@@ -129,38 +135,57 @@ func runServer() (exit bool) {
 		}
 	}
 
+	// newHTTPServer applies hardened timeouts to every listener so a slow client
+	// cannot hold a connection open indefinitely (Slowloris) and request headers
+	// are bounded. Behind a reverse proxy these still backstop a misbehaving proxy.
+	newHTTPServer := func(addr string, handler http.Handler) *http.Server {
+		return &http.Server{
+			Addr:              addr,
+			Handler:           handler,
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       30 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       120 * time.Second,
+			MaxHeaderBytes:    1 << 20, // 1 MiB
+		}
+	}
+
 	var srv *http.Server
+	var redirectSrv *http.Server
 
 	if cfg.TLSDisabled {
 		addr := ":" + cfg.Port
 		log.Printf("HTTP listening on %s (TLS disabled — reverse proxy mode)", addr)
-		srv = &http.Server{Addr: addr, Handler: h}
+		srv = newHTTPServer(addr, h)
 	} else {
 		// Start HTTP → HTTPS redirect server
 		if cfg.HTTPPort != "" {
+			httpAddr := ":" + cfg.HTTPPort
+			httpsPort := cfg.Port
+			log.Printf("HTTP redirect :%s → HTTPS :%s", cfg.HTTPPort, httpsPort)
+			redirectHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				host := r.Host
+				if h, _, err := net.SplitHostPort(host); err == nil {
+					host = h
+				}
+				target := "https://" + host
+				if httpsPort != "443" {
+					target += ":" + httpsPort
+				}
+				target += r.URL.RequestURI()
+				http.Redirect(w, r, target, http.StatusMovedPermanently)
+			})
+			redirectSrv = newHTTPServer(httpAddr, redirectHandler)
 			go func() {
-				httpAddr := ":" + cfg.HTTPPort
-				httpsPort := cfg.Port
-				log.Printf("HTTP redirect :%s → HTTPS :%s", cfg.HTTPPort, httpsPort)
-				redirectHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					host := r.Host
-					if h, _, err := net.SplitHostPort(host); err == nil {
-						host = h
-					}
-					target := "https://" + host
-					if httpsPort != "443" {
-						target += ":" + httpsPort
-					}
-					target += r.URL.RequestURI()
-					http.Redirect(w, r, target, http.StatusMovedPermanently)
-				})
-				http.ListenAndServe(httpAddr, redirectHandler)
+				if err := redirectSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+					log.Printf("HTTP redirect server stopped: %v", err)
+				}
 			}()
 		}
 
 		addr := ":" + cfg.Port
 		log.Printf("HTTPS listening on %s", addr)
-		srv = &http.Server{Addr: addr, Handler: h}
+		srv = newHTTPServer(addr, h)
 	}
 
 	// Listen for restart signal
@@ -170,6 +195,9 @@ func runServer() (exit bool) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		srv.Shutdown(ctx)
+		if redirectSrv != nil {
+			redirectSrv.Shutdown(ctx)
+		}
 	}()
 
 	// Start serving
@@ -193,6 +221,27 @@ func generateAdminKey() string {
 	b := make([]byte, 16)
 	rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// loadOrCreateAdminKey returns a stable admin key when none is configured. It
+// persists the generated key to <dataDir>/admin.key (0600) so it survives
+// restarts instead of being regenerated each boot, and logs the file path
+// rather than the secret itself so the key never lands in stdout/log capture.
+func loadOrCreateAdminKey(dataDir string) string {
+	path := filepath.Join(dataDir, "admin.key")
+	if b, err := os.ReadFile(path); err == nil {
+		if key := strings.TrimSpace(string(b)); key != "" {
+			log.Printf("No admin_key configured — using the persisted key at %s", path)
+			return key
+		}
+	}
+	key := generateAdminKey()
+	if err := os.WriteFile(path, []byte(key+"\n"), 0600); err != nil {
+		log.Printf("WARNING: no admin_key configured and could not persist one to %s: %v — it will change on restart", path, err)
+	} else {
+		log.Printf("No admin_key configured — generated one and saved it to %s (read it from there; set admin_key/AUTH_ADMIN_KEY to override)", path)
+	}
+	return key
 }
 
 // ensureDefaultApp creates a default app on first v2 start, wrapping the

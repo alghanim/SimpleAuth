@@ -29,6 +29,9 @@
 //   SIMPLEAUTH_AUDIENCE    Expected token audience (default: SIMPLEAUTH_APP_ID)
 //   SIMPLEAUTH_GROUP       Directory group to grant "admin" (default: Finance)
 //   SIMPLEAUTH_TOKEN       Optional access token to verify at the end
+//   SIMPLEAUTH_FOREIGN_TOKEN  Optional validly-signed token minted for a
+//                          DIFFERENT app; used to demonstrate genuine audience
+//                          rejection (its `aud` won't match this app's).
 //   SIMPLEAUTH_INSECURE    Set "true" to trust self-signed certs (dev only)
 //
 // Usage:
@@ -67,6 +70,11 @@ var group = Environment.GetEnvironmentVariable("SIMPLEAUTH_GROUP") ?? "Finance";
 
 // Optionally verify a real token at the end of the run.
 var token = Environment.GetEnvironmentVariable("SIMPLEAUTH_TOKEN");
+
+// Optionally, a validly-signed token minted for a DIFFERENT app. Used below to
+// demonstrate *genuine* audience rejection: a well-formed, correctly-signed
+// token that is rejected solely because its `aud` is some other app, not ours.
+var foreignToken = Environment.GetEnvironmentVariable("SIMPLEAUTH_FOREIGN_TOKEN");
 
 // Construct the client as an *app*: AppId/AppSecret authenticate the /api/app/*
 // calls, and Audience makes VerifyAsync reject other apps' tokens.
@@ -165,18 +173,46 @@ catch (SimpleAuthException ex)
 
 Console.WriteLine("\n[2] Token verification (audience-scoped)...");
 
-// Anything not minted for this app fails to verify -- this is the RP-side check
-// that makes a foreign-app token useless here. (We catch the broad Exception
-// only because this token is deliberately malformed; a real, well-formed token
-// that merely fails verification throws SimpleAuthException -- see Step 2 below.)
+// (a) Malformed-input rejection. This is NOT an audience test: the string is not
+// a real JWT, so VerifyAsync fails at base64/JSON parsing long before the `aud`
+// check ever runs. It only shows that garbage input is rejected cleanly as a
+// SimpleAuthException (not an uncaught 500). See (b) for the real audience test.
 try
 {
     await client.VerifyAsync("not.a.valid-token-for-this-app");
-    Console.WriteLine("  WARNING: a foreign token verified -- check the Audience option.");
+    Console.WriteLine("  WARNING: a malformed token verified -- this should never happen.");
 }
-catch (Exception ex)
+catch (SimpleAuthException ex)
 {
-    Console.WriteLine($"  Rejected token not minted for '{audience}': {ex.Message}");
+    Console.WriteLine($"  Malformed token rejected: {ex.Message}");
+}
+
+// (b) Genuine audience rejection. To actually exercise the `aud` check we need a
+// well-formed, correctly-signed token whose `aud` is a DIFFERENT app. Its
+// signature verifies against the shared JWKS, so the ONLY thing that rejects it
+// is the Audience mismatch -- proving cross-app isolation is enforced. Supply
+// one via SIMPLEAUTH_FOREIGN_TOKEN (e.g. an access token issued for another app).
+if (!string.IsNullOrEmpty(foreignToken))
+{
+    try
+    {
+        await client.VerifyAsync(foreignToken);
+        Console.WriteLine(
+            "  WARNING: a foreign-app token verified -- check the Audience option; " +
+            "cross-app isolation is NOT being enforced.");
+    }
+    catch (SimpleAuthException ex)
+    {
+        // A validly-signed token rejected here failed on `aud`, not on parsing
+        // or signature -- this is the audience scoping doing its job.
+        Console.WriteLine($"  Foreign-app token rejected by audience check: {ex.Message}");
+    }
+}
+else
+{
+    Console.WriteLine(
+        "  Skipped audience-rejection test -- set SIMPLEAUTH_FOREIGN_TOKEN to a " +
+        "validly-signed token minted for a DIFFERENT app to verify `aud` enforcement.");
 }
 
 if (string.IsNullOrEmpty(token))

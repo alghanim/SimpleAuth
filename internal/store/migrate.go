@@ -15,8 +15,8 @@ import (
 
 // MigrationStatus tracks progress of a database migration.
 type MigrationStatus struct {
-	State         string            `json:"state"`          // idle, running, verifying, completed, failed
-	Progress      map[string]string `json:"progress"`       // table → status
+	State         string            `json:"state"`    // idle, running, verifying, completed, failed
+	Progress      map[string]string `json:"progress"` // table → status
 	TotalItems    int64             `json:"total_items"`
 	MigratedItems int64             `json:"migrated_items"`
 	StartedAt     int64             `json:"started_at,omitempty"`
@@ -151,19 +151,19 @@ func MigrateToPostgres(source *BoltStore, target *PostgresStore, statusCh chan<-
 	m.status.State = "verifying"
 	m.send()
 	verifyMap := map[string]string{
-		"users":              "sa_users",
-		"identity_mappings":  "sa_identity_mappings",
-		"user_roles":         "sa_user_roles",
-		"user_permissions":   "sa_user_permissions",
-		"config":             "sa_config",
-		"refresh_tokens":     "sa_refresh_tokens",
-		"audit_log":          "sa_audit_log",
-		"oidc_auth_codes":    "sa_oidc_auth_codes",
-		"sessions":           "sa_sessions",
-		"revoked_tokens":     "sa_revoked_tokens",
-		"revoked_users":      "sa_revoked_users",
-		"apps":               "sa_apps",
-		"app_authz":          "sa_app_authz",
+		"users":             "sa_users",
+		"identity_mappings": "sa_identity_mappings",
+		"user_roles":        "sa_user_roles",
+		"user_permissions":  "sa_user_permissions",
+		"config":            "sa_config",
+		"refresh_tokens":    "sa_refresh_tokens",
+		"audit_log":         "sa_audit_log",
+		"oidc_auth_codes":   "sa_oidc_auth_codes",
+		"sessions":          "sa_sessions",
+		"revoked_tokens":    "sa_revoked_tokens",
+		"revoked_users":     "sa_revoked_users",
+		"apps":              "sa_apps",
+		"app_authz":         "sa_app_authz",
 	}
 	for boltName, pgTable := range verifyMap {
 		expected := sourceCounts[boltName]
@@ -295,6 +295,36 @@ func MigrateFromPostgres(source *PostgresStore, target *BoltStore, statusCh chan
 	}
 	m.send()
 
+	// Clean slate. admin_migration reopens OpenBolt(dataDir), so the target may
+	// be an existing auth.db reused on the same data dir (e.g. the deployment
+	// previously ran on BoltDB, switched to Postgres, and is now migrating back).
+	// Wipe every bucket we are about to repopulate so stale users, sessions,
+	// refresh tokens and — most importantly — the revoked-tokens / revoked-users
+	// blacklists from the prior BoltDB era cannot resurface, which would make
+	// already-revoked credentials valid again.
+	migratedBuckets := [][]byte{
+		bucketUsers, bucketIdentityMappings, bucketIdxMappingsByGUID,
+		bucketUserRoles, bucketUserPermissions, bucketConfig,
+		bucketRefreshTokens, bucketAuditLog, bucketOIDCAuthCodes,
+		bucketSessions, bucketRevokedTokens, bucketRevokedUsers,
+		bucketApps, bucketAppAuthz,
+	}
+	if err := target.db.Update(func(tx *bolt.Tx) error {
+		for _, name := range migratedBuckets {
+			if tx.Bucket(name) != nil {
+				if err := tx.DeleteBucket(name); err != nil {
+					return err
+				}
+			}
+			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return m.fail(fmt.Errorf("clear target buckets: %w", err))
+	}
+
 	// Copy each table
 	for _, t := range tables {
 		m.status.Progress[t.name] = "migrating"
@@ -423,10 +453,13 @@ func MigrateFromPostgres(source *PostgresStore, target *BoltStore, statusCh chan
 	m.status.State = "verifying"
 	m.send()
 	for _, t := range tables {
-		expected := sourceCounts[t.name]
-		if expected == 0 {
+		// identity_mappings: BoltDB stores forward + reverse index entries, so its
+		// bucket count legitimately differs from the SQL row count — skip strict
+		// verification for it (but it was still cleared + recopied above).
+		if t.name == "identity_mappings" {
 			continue
 		}
+		expected := sourceCounts[t.name]
 		var actual int64
 		target.db.View(func(tx *bolt.Tx) error {
 			b := tx.Bucket([]byte(t.name))
@@ -436,11 +469,8 @@ func MigrateFromPostgres(source *PostgresStore, target *BoltStore, statusCh chan
 			b.ForEach(func(k, v []byte) error { actual++; return nil })
 			return nil
 		})
-		// identity_mappings: BoltDB has forward + reverse index entries counted differently
-		// so skip strict verification for it
-		if t.name == "identity_mappings" {
-			continue
-		}
+		// Verify even when expected == 0: after the clean-slate wipe the bucket
+		// must be empty, so a non-zero actual means stale data leaked through.
 		if actual != expected {
 			return m.fail(fmt.Errorf("verification failed for %s: expected %d rows, got %d", t.name, expected, actual))
 		}

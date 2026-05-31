@@ -52,8 +52,16 @@ func (h *Handler) handleHostedLoginPage(w http.ResponseWriter, r *http.Request) 
 	redirectURI := r.URL.Query().Get("redirect_uri")
 	errorMsg := r.URL.Query().Get("error")
 
-	// Validate redirect_uri
-	if redirectURI != "" && !isAllowedRedirect(h.getRedirectURIs(), redirectURI) {
+	// Resolve the app from client_id and validate redirect_uri against the app's
+	// OWN allowlist (not the global one) before entering the session-SSO branch.
+	// Otherwise a session-cookie auto-login could deliver an app-scoped token to
+	// a globally-allowed URI the app never registered (F38 / regression of L1).
+	app, err := h.resolveApp(r.URL.Query().Get("client_id"))
+	if err != nil {
+		http.Error(w, "unknown client", http.StatusBadRequest)
+		return
+	}
+	if redirectURI != "" && !h.appAllowsRedirect(app, redirectURI) {
 		http.Error(w, "redirect_uri not allowed", http.StatusBadRequest)
 		return
 	}
@@ -231,6 +239,14 @@ func (h *Handler) completeHostedLoginWithSession(w http.ResponseWriter, r *http.
 		h.redirectToLoginError(w, r, redirectURI, "Unknown app")
 		return
 	}
+	// Defense-in-depth: re-validate the redirect against the resolved app's own
+	// allowlist regardless of caller, so an app-scoped token is never delivered
+	// to a URI the app never authorized (F38). Do NOT redirect to the rejected
+	// URI — fail with a plain error instead.
+	if redirectURI != "" && !h.appAllowsRedirect(app, redirectURI) {
+		http.Error(w, "redirect_uri not allowed", http.StatusBadRequest)
+		return
+	}
 	roles, perms, denied := h.resolveTokenRoles(app, user)
 	if denied {
 		h.redirectToLoginError(w, r, redirectURI, "Access denied: not assigned to this app")
@@ -311,19 +327,23 @@ func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) redirectToLoginError(w http.ResponseWriter, r *http.Request, redirectURI, msg string) {
-	// If redirect_uri is set and allowed, send the error back to the app
-	// so it can handle it (e.g. show password fallback modal).
-	// redirect_uri is already validated by the caller before reaching here.
+	// Re-validate redirect_uri against the resolved app's allowlist here so no
+	// caller can turn this into an open redirect — e.g. the empty-credentials
+	// branch reaches this before the caller's own allowlist check (F29). Only
+	// bounce the error back to the app when the URI is genuinely allowlisted;
+	// otherwise fall back to SimpleAuth's own login page.
 	if redirectURI != "" {
-		sep := "?"
-		if strings.Contains(redirectURI, "?") {
-			sep = "&"
+		if app, err := h.resolveApp(r.FormValue("client_id")); err == nil && h.appAllowsRedirect(app, redirectURI) {
+			sep := "?"
+			if strings.Contains(redirectURI, "?") {
+				sep = "&"
+			}
+			http.Redirect(w, r, redirectURI+sep+"error="+url.QueryEscape(msg), http.StatusFound)
+			return
 		}
-		http.Redirect(w, r, redirectURI+sep+"error="+url.QueryEscape(msg), http.StatusFound)
-		return
 	}
-	// No redirect_uri — show SimpleAuth's own login page with error
-	// manual=1 prevents auto-SSO from looping
+	// No / disallowed redirect_uri — show SimpleAuth's own login page with error.
+	// manual=1 prevents auto-SSO from looping.
 	u := h.url("/login") + "?error=" + url.QueryEscape(msg) + "&manual=1"
 	http.Redirect(w, r, u, http.StatusFound)
 }

@@ -6,12 +6,20 @@
 #   cp .env.example .env    # Edit with your values
 #   docker compose up -d
 #
-# Full stack with nginx TLS termination:
+# Full stack with nginx TLS termination (RECOMMENDED for production):
 #   1. Place TLS cert/key in deploy/nginx/certs/
-#   2. docker compose --profile full up -d
+#   2. In .env set AUTH_TLS_DISABLED=true  (nginx terminates TLS; the app is
+#      reachable ONLY on the internal network, so plaintext there is fine)
+#   3. docker compose --profile full up -d
 #
 # With your app:
 #   docker compose --profile full --profile app up -d
+#
+# SECURITY DEFAULTS:
+#   - The app port is NOT published to the host (internal network only).
+#   - TLS is ENABLED by default (AUTH_TLS_DISABLED=false) so a bare run is HTTPS.
+#     Set AUTH_TLS_DISABLED=true ONLY under the nginx `full` profile (above) or
+#     another TLS-terminating proxy on a trusted network.
 #
 # All config comes from .env — see .env.example for all options.
 # =============================================================================
@@ -37,7 +45,12 @@ services:
       AUTH_DEPLOYMENT_NAME: "${AUTH_DEPLOYMENT_NAME:-sauth}"
       AUTH_PORT: "${AUTH_PORT:-8080}"
       AUTH_HTTP_PORT: "${AUTH_HTTP_PORT:-}"
-      AUTH_TLS_DISABLED: "${AUTH_TLS_DISABLED:-true}"
+      # TLS is ENABLED by default (the app serves its own HTTPS / auto self-signed).
+      # Only set AUTH_TLS_DISABLED=true when this container sits behind a TLS-
+      # terminating reverse proxy (the bundled nginx `full` profile, Traefik,
+      # Caddy, ...). Disabling TLS while host-exposing the port serves all
+      # credentials, tokens and the admin key in cleartext — do not do that.
+      AUTH_TLS_DISABLED: "${AUTH_TLS_DISABLED:-false}"
       AUTH_TRUSTED_PROXIES: "${AUTH_TRUSTED_PROXIES:-172.16.0.0/12,10.0.0.0/8,192.168.0.0/16}"
       AUTH_JWT_ISSUER: "${AUTH_JWT_ISSUER:-simpleauth}"
       AUTH_JWT_ACCESS_TTL: "${AUTH_JWT_ACCESS_TTL:-8h}"
@@ -56,18 +69,34 @@ services:
       # Kerberos (uncomment if needed)
       # AUTH_KRB5_KEYTAB: "/data/krb5.keytab"
       # AUTH_KRB5_REALM: "${AUTH_KRB5_REALM:-}"
-      # TLS (not needed when AUTH_TLS_DISABLED=true)
+      # TLS cert/key (optional — auto self-signed when empty)
       # AUTH_TLS_CERT: "/data/tls.crt"
       # AUTH_TLS_KEY: "/data/tls.key"
 
     volumes:
       - simpleauth-data:/data
 
-    ports:
-      - "${SIMPLEAUTH_PORT:-8080}:${AUTH_PORT:-8080}"
+    # By default the app port is NOT published to the host. It is only reachable
+    # on the internal `simpleauth-net` network (e.g. by the nginx `full` profile),
+    # so the plaintext/backend port can never be hit directly, bypassing nginx
+    # TLS termination, security headers and rate limiting.
+    expose:
+      - "${AUTH_PORT:-8080}"
+
+    # To run bare SimpleAuth (no nginx) and reach it from the host, publish the
+    # port bound to LOOPBACK ONLY and keep TLS enabled (AUTH_TLS_DISABLED=false).
+    # Never bind 0.0.0.0 with TLS disabled.
+    # ports:
+    #   - "127.0.0.1:${SIMPLEAUTH_PORT:-8080}:${AUTH_PORT:-8080}"
 
     networks:
       - simpleauth-net
+
+    # ----- Container hardening -------------------------------------------------
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
 
     deploy:
       resources:
@@ -80,6 +109,10 @@ services:
   # ---------------------------------------------------------------------------
   # Nginx — reverse proxy with production TLS termination
   # Activate with: docker compose --profile full up -d
+  # Terminates TLS on host 80/443 and proxies to simpleauth over the internal
+  # network. Set AUTH_TLS_DISABLED=true in .env so the backend speaks plain HTTP
+  # internally; it is never exposed to the host, so only nginx can reach it.
+  # Runs unprivileged (non-root) on container ports 8080/8443.
   # ---------------------------------------------------------------------------
   nginx:
     profiles: ["full"]
@@ -92,9 +125,11 @@ services:
       simpleauth:
         condition: service_healthy
 
+    # nginx runs unprivileged (non-root) and listens on 8080/8443 inside the
+    # container; the host's privileged 80/443 are mapped to those high ports.
     ports:
-      - "80:80"
-      - "443:443"
+      - "80:8080"
+      - "443:8443"
 
     volumes:
       - ./deploy/nginx/certs/fullchain.pem:/etc/nginx/ssl/fullchain.pem:ro
@@ -102,6 +137,12 @@ services:
 
     networks:
       - simpleauth-net
+
+    # ----- Container hardening -------------------------------------------------
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
 
     deploy:
       resources:

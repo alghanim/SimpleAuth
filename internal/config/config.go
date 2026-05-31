@@ -18,39 +18,39 @@ import (
 	"strings"
 	"time"
 
-"gopkg.in/yaml.v3"
+	"gopkg.in/yaml.v3"
 )
 
 var deploymentNameRe = regexp.MustCompile(`^[a-zA-Z]{1,6}$`)
 
 type Config struct {
-	Hostname       string        `yaml:"hostname"`
-	Port           string        `yaml:"port"`
-	DataDir        string        `yaml:"data_dir"`
-	AdminKey       string        `yaml:"admin_key"`
-	DeploymentName string        `yaml:"deployment_name"`
-	JWTIssuer       string        `yaml:"jwt_issuer"`
-	AccessTTL       time.Duration `yaml:"access_ttl"`
-	RefreshTTL      time.Duration `yaml:"refresh_ttl"`
-	ImpersonateTTL  time.Duration `yaml:"impersonate_ttl"`
-	KRB5Keytab      string        `yaml:"krb5_keytab"`
-	KRB5Realm       string        `yaml:"krb5_realm"`
-	TLSCert         string        `yaml:"tls_cert"`
-	TLSKey          string        `yaml:"tls_key"`
-	TLSDisabled     bool          `yaml:"tls_disabled"`
-	TrustedProxies   []string      `yaml:"trusted_proxies"`
-	TrustedProxyCIDRs []*net.IPNet `yaml:"-"`
-	BasePath        string        `yaml:"base_path"`
-	AuditRetention  time.Duration `yaml:"audit_retention"`
-	RateLimitMax    int           `yaml:"rate_limit_max"`
-	RateLimitWindow time.Duration `yaml:"rate_limit_window"`
-	CORSOrigins     string        `yaml:"cors_origins"`
-	HTTPPort        string        `yaml:"http_port"`
-	ClientID        string        `yaml:"client_id"`     // Legacy — not validated, kept for backward compat
-	ClientSecret    string        `yaml:"client_secret"` // Legacy — not validated, kept for backward compat
-	RedirectURI     string        `yaml:"redirect_uri"`
-	RedirectURIs    []string      `yaml:"redirect_uris"`
-	DefaultRoles    []string      `yaml:"default_roles"`
+	Hostname          string        `yaml:"hostname"`
+	Port              string        `yaml:"port"`
+	DataDir           string        `yaml:"data_dir"`
+	AdminKey          string        `yaml:"admin_key"`
+	DeploymentName    string        `yaml:"deployment_name"`
+	JWTIssuer         string        `yaml:"jwt_issuer"`
+	AccessTTL         time.Duration `yaml:"access_ttl"`
+	RefreshTTL        time.Duration `yaml:"refresh_ttl"`
+	ImpersonateTTL    time.Duration `yaml:"impersonate_ttl"`
+	KRB5Keytab        string        `yaml:"krb5_keytab"`
+	KRB5Realm         string        `yaml:"krb5_realm"`
+	TLSCert           string        `yaml:"tls_cert"`
+	TLSKey            string        `yaml:"tls_key"`
+	TLSDisabled       bool          `yaml:"tls_disabled"`
+	TrustedProxies    []string      `yaml:"trusted_proxies"`
+	TrustedProxyCIDRs []*net.IPNet  `yaml:"-"`
+	BasePath          string        `yaml:"base_path"`
+	AuditRetention    time.Duration `yaml:"audit_retention"`
+	RateLimitMax      int           `yaml:"rate_limit_max"`
+	RateLimitWindow   time.Duration `yaml:"rate_limit_window"`
+	CORSOrigins       string        `yaml:"cors_origins"`
+	HTTPPort          string        `yaml:"http_port"`
+	ClientID          string        `yaml:"client_id"`     // Legacy — not validated, kept for backward compat
+	ClientSecret      string        `yaml:"client_secret"` // Legacy — not validated, kept for backward compat
+	RedirectURI       string        `yaml:"redirect_uri"`
+	RedirectURIs      []string      `yaml:"redirect_uris"`
+	DefaultRoles      []string      `yaml:"default_roles"`
 
 	// Password policy
 	PasswordMinLength        int           `yaml:"password_min_length"`
@@ -82,25 +82,25 @@ type Config struct {
 
 // configFile is an intermediate struct for YAML parsing with string durations.
 type configFile struct {
-	Hostname        string `yaml:"hostname"`
-	Port            string `yaml:"port"`
-	DataDir         string `yaml:"data_dir"`
-	AdminKey        string `yaml:"admin_key"`
-	DeploymentName     string `yaml:"deployment_name"`
-	JWTIssuer       string `yaml:"jwt_issuer"`
-	AccessTTL       string `yaml:"access_ttl"`
-	RefreshTTL      string `yaml:"refresh_ttl"`
-	ImpersonateTTL  string `yaml:"impersonate_ttl"`
-	KRB5Keytab      string `yaml:"krb5_keytab"`
-	KRB5Realm       string `yaml:"krb5_realm"`
-	TLSCert         string `yaml:"tls_cert"`
-	TLSKey          string `yaml:"tls_key"`
+	Hostname        string   `yaml:"hostname"`
+	Port            string   `yaml:"port"`
+	DataDir         string   `yaml:"data_dir"`
+	AdminKey        string   `yaml:"admin_key"`
+	DeploymentName  string   `yaml:"deployment_name"`
+	JWTIssuer       string   `yaml:"jwt_issuer"`
+	AccessTTL       string   `yaml:"access_ttl"`
+	RefreshTTL      string   `yaml:"refresh_ttl"`
+	ImpersonateTTL  string   `yaml:"impersonate_ttl"`
+	KRB5Keytab      string   `yaml:"krb5_keytab"`
+	KRB5Realm       string   `yaml:"krb5_realm"`
+	TLSCert         string   `yaml:"tls_cert"`
+	TLSKey          string   `yaml:"tls_key"`
 	TLSDisabled     bool     `yaml:"tls_disabled"`
 	TrustedProxies  []string `yaml:"trusted_proxies"`
 	BasePath        string   `yaml:"base_path"`
-	AuditRetention  string `yaml:"audit_retention"`
-	RateLimitMax    int    `yaml:"rate_limit_max"`
-	RateLimitWindow string `yaml:"rate_limit_window"`
+	AuditRetention  string   `yaml:"audit_retention"`
+	RateLimitMax    int      `yaml:"rate_limit_max"`
+	RateLimitWindow string   `yaml:"rate_limit_window"`
 	CORSOrigins     string   `yaml:"cors_origins"`
 	HTTPPort        string   `yaml:"http_port"`
 	ClientID        string   `yaml:"client_id"`
@@ -133,18 +133,18 @@ type configFile struct {
 // certificates. Call Validate() after applying any programmatic overrides.
 func Load() *Config {
 	cfg := &Config{
-		Port:            "9090",
-		DataDir:         "./data",
-		BasePath:        "/sauth",
-		DeploymentName:     "sauth",
-		JWTIssuer:       "simpleauth",
-		AccessTTL:       15 * time.Minute,
-		RefreshTTL:      720 * time.Hour,
-		ImpersonateTTL:  1 * time.Hour,
-		AuditRetention:  90 * 24 * time.Hour,
-		RateLimitMax:    10,
-		RateLimitWindow: 1 * time.Minute,
-		HTTPPort:        "80",
+		Port:                   "9090",
+		DataDir:                "./data",
+		BasePath:               "/sauth",
+		DeploymentName:         "sauth",
+		JWTIssuer:              "simpleauth",
+		AccessTTL:              15 * time.Minute,
+		RefreshTTL:             720 * time.Hour,
+		ImpersonateTTL:         1 * time.Hour,
+		AuditRetention:         90 * 24 * time.Hour,
+		RateLimitMax:           10,
+		RateLimitWindow:        1 * time.Minute,
+		HTTPPort:               "80",
 		AutoSSODelay:           3,
 		PasswordMinLength:      8,
 		AccountLockoutDuration: 30 * time.Minute,
@@ -166,8 +166,11 @@ func Load() *Config {
 // Returns an error instead of calling log.Fatalf, so callers control their
 // own process lifecycle.
 func (cfg *Config) Validate() error {
-	// Ensure data directory exists
-	os.MkdirAll(cfg.DataDir, 0700)
+	// Ensure data directory exists (0700: it holds private keys and the secret
+	// key). Surface failures instead of silently continuing (F65).
+	if err := os.MkdirAll(cfg.DataDir, 0700); err != nil {
+		return fmt.Errorf("create data dir %q: %w", cfg.DataDir, err)
+	}
 
 	// Hostname is mandatory
 	if cfg.Hostname == "" {

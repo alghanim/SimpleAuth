@@ -17,6 +17,7 @@ type LDAPConfig struct {
 	CustomFilter    string
 	UseTLS          bool
 	SkipTLSVerify   bool
+	AllowInsecure   bool
 	DisplayNameAttr string
 	EmailAttr       string
 	DepartmentAttr  string
@@ -41,14 +42,30 @@ func LDAPConnect(cfg *LDAPConfig) (*ldap.Conn, error) {
 	var err error
 
 	if cfg.UseTLS {
+		// ldaps:// — implicit TLS from the first byte.
 		conn, err = ldap.DialURL(cfg.URL, ldap.DialWithTLSConfig(&tls.Config{
 			InsecureSkipVerify: cfg.SkipTLSVerify,
 		}))
-	} else {
-		conn, err = ldap.DialURL(cfg.URL)
+		if err != nil {
+			return nil, fmt.Errorf("ldap connect: %w", err)
+		}
+		return conn, nil
 	}
+
+	// Plain ldap:// — dial, then upgrade to TLS with StartTLS *before any bind*
+	// so the service-account and end-user passwords are never transmitted in
+	// cleartext. Fail closed if the upgrade fails, unless the operator has
+	// explicitly opted into insecure cleartext binds (allow_insecure).
+	conn, err = ldap.DialURL(cfg.URL)
 	if err != nil {
 		return nil, fmt.Errorf("ldap connect: %w", err)
+	}
+	if cfg.AllowInsecure {
+		return conn, nil
+	}
+	if err := conn.StartTLS(&tls.Config{InsecureSkipVerify: cfg.SkipTLSVerify}); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("ldap StartTLS upgrade failed; refusing cleartext bind (use ldaps:// or set allow_insecure): %w", err)
 	}
 	return conn, nil
 }
@@ -246,11 +263,17 @@ func entryToResult(entry *ldap.Entry, cfg *LDAPConfig) *LDAPResult {
 	}
 	if cfg.GroupsAttr != "" {
 		result.Groups = entry.GetAttributeValues(cfg.GroupsAttr)
-		// Extract CN from full DN group names
+		// Extract the CN from full DN group names, case-insensitively. AD returns
+		// "CN=Admins,OU=...", but some directories emit lowercase "cn="; the old
+		// code matched case-insensitively yet stripped only the uppercase "CN="
+		// prefix, leaving "cn=Admins" intact and breaking group→role mapping.
 		for i, g := range result.Groups {
-			if strings.HasPrefix(strings.ToLower(g), "cn=") {
-				parts := strings.SplitN(g, ",", 2)
-				result.Groups[i] = strings.TrimPrefix(parts[0], "CN=")
+			if idx := strings.Index(g, "="); idx > 0 && strings.EqualFold(g[:idx], "cn") {
+				cn := g[idx+1:]
+				if comma := strings.Index(cn, ","); comma >= 0 {
+					cn = cn[:comma]
+				}
+				result.Groups[i] = cn
 			}
 		}
 	}

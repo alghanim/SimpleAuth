@@ -16,6 +16,10 @@ var (
 	ErrRefreshTokenReused = errors.New("refresh token already used")
 	// ErrAppExists is returned by CreateApp when the app_id is already taken.
 	ErrAppExists = errors.New("app already exists")
+	// ErrAppNotFound is returned by GetApp when the app_id does not exist. It lets
+	// callers distinguish "no such app" from a real store error (so they can fail
+	// closed on the latter instead of treating it as not-found).
+	ErrAppNotFound = errors.New("app not found")
 )
 
 // Store defines the storage interface for SimpleAuth. Both BoltDB and
@@ -91,6 +95,10 @@ type Store interface {
 	RevokeTokenFamily(familyID string) error
 	ListUserSessions(userGUID string) ([]*RefreshToken, error)
 	RevokeUserTokens(userGUID string) error
+	// CleanExpiredRefreshTokens deletes refresh tokens whose exp has passed.
+	// Expired tokens can no longer be redeemed (the JWT exp rejects them), so
+	// pruning them bounds storage growth and keeps family-revocation scans fast.
+	CleanExpiredRefreshTokens() error
 
 	// Audit Log
 	WriteAuditLog(entry *AuditEntry) error
@@ -105,6 +113,10 @@ type Store interface {
 	// OIDC
 	SaveOIDCAuthCode(code *OIDCAuthCode) error
 	ConsumeOIDCAuthCode(code string) (*OIDCAuthCode, error)
+	// CleanExpiredOIDCCodes deletes authorization codes whose exp has passed.
+	// Codes are deleted on redemption, so this only reaps abandoned codes that
+	// were never exchanged (bounds growth of the oidc_auth_codes store).
+	CleanExpiredOIDCCodes() error
 
 	// Runtime Settings
 	GetRuntimeSettings() (*RuntimeSettings, error)

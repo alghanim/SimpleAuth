@@ -2,19 +2,22 @@
 // SimpleAuth Example: Basic Login (Go)
 // ---------------------------------------------------------------------------
 // Demonstrates the fundamental authentication lifecycle in Go:
-//   1. Login with username and password
-//   2. Verify the returned access token
-//   3. Print user info and check roles/permissions
-//   4. Refresh the token
+//  1. Login with username and password
+//  2. Verify the returned access token
+//  3. Print user info and check roles/permissions
+//  4. Refresh the token
 //
 // Usage:
-//   go run main.go
+//
+//	go run main.go
 //
 // Environment variables:
-//   SIMPLEAUTH_URL        — SimpleAuth server URL (default: https://auth.corp.local/sauth)
-//   SIMPLEAUTH_INSECURE   — set "true" to trust self-signed certs (dev only)
-//   TEST_USERNAME         — Username for login (default: admin)
-//   TEST_PASSWORD         — Password for login (default: admin123)
+//
+//	SIMPLEAUTH_URL        — SimpleAuth server URL (default: https://auth.corp.local/sauth)
+//	SIMPLEAUTH_INSECURE   — set "true" to trust self-signed certs (dev only)
+//	TEST_USERNAME         — Username for login (default: admin)
+//	TEST_PASSWORD         — Password for login (default: admin123)
+//
 // ---------------------------------------------------------------------------
 package main
 

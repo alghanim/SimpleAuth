@@ -33,7 +33,11 @@ RUN if [ -z "$BUILD_TIME" ]; then BUILD_TIME=$(date -u '+%Y-%m-%dT%H:%M:%SZ'); f
 # ---------------------------------------------------------------------------
 # Stage 2: Minimal runtime image
 # ---------------------------------------------------------------------------
-FROM alpine:3.19
+# Pinned to a supported Alpine release by digest. alpine:3.19 reached EOL
+# (community support ended ~Nov 2025); 3.21 is supported into late 2026 and
+# still receives security updates for krb5-libs/ca-certificates.
+# Digest pin makes the base immutable; bump the tag+digest together on upgrade.
+FROM alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
 
 # OCI image labels
 LABEL org.opencontainers.image.title="SimpleAuth" \

@@ -172,24 +172,14 @@ app.get(
   },
 );
 
-app.post(
-  "/api/admin/users/:userId/roles",
-  requireAuth,
-  requireRole("admin", "user-manager"),
-  async (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const { userId } = req.params;
-      const { roles } = req.body as { roles: string[] };
-
-      // Use the admin SDK to update roles on SimpleAuth
-      await auth.setUserRoles(userId, roles);
-
-      res.json({ message: "Roles updated", userId, roles });
-    } catch (err) {
-      next(err);
-    }
-  },
-);
+// NOTE: This RP example deliberately does NOT expose a route that mutates user
+// roles on SimpleAuth. Doing so would require the global *master admin key*
+// (auth.setUserRoles() sends it as a Bearer credential), and that key can
+// rewrite ANY user's roles across the whole deployment. An internet-facing
+// service must never hold it -- a single bug or compromise would hand an
+// attacker server-wide admin. Role/assignment management belongs in a separate,
+// non-internet-facing admin tool, or should use the v2 per-app credential
+// (appId/appSecret) and the app authz API, which is scoped to this app only.
 
 // --- Permission-restricted routes -----------------------------------------
 
@@ -253,7 +243,6 @@ app.listen(PORT, () => {
   console.log("  GET  /api/profile               — authenticated user profile");
   console.log("  GET  /api/dashboard             — authenticated user dashboard");
   console.log("  GET  /api/admin/users           — admin only: list users");
-  console.log("  POST /api/admin/users/:id/roles — admin/user-manager: assign roles");
   console.log("  POST /api/reports               — requires reports:create permission");
   console.log("  DEL  /api/reports/:id           — requires reports:delete permission");
 });

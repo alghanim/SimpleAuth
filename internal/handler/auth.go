@@ -674,6 +674,16 @@ func (h *Handler) handleImpersonate(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "target user not found", http.StatusNotFound)
 		return
 	}
+	// Don't mint an impersonation token for a target who could not log in
+	// themselves — match the login/refresh gates (F44).
+	if target.Disabled {
+		jsonError(w, "target user is disabled", http.StatusForbidden)
+		return
+	}
+	if revoked, _ := h.store.IsUserAccessRevoked(target.GUID); revoked {
+		jsonError(w, "target user access is revoked", http.StatusForbidden)
+		return
+	}
 
 	// Scope the impersonation token to an app so it carries an audience and the
 	// target's per-app roles, instead of an aud-less token with global roles that
@@ -753,6 +763,20 @@ func (h *Handler) validateAccessToken(tokenStr string) (*auth.Claims, error) {
 	// user — including the case where an app_id collides with a user GUID (H7).
 	if claims.Typ == "app-mgmt" {
 		return nil, fmt.Errorf("not a user access token")
+	}
+	// Reject non-access token classes presented at a user-resource boundary.
+	// Every token here is signed by the same RSA key, so the signature alone does
+	// not prove the token is an access token; we must check its class explicitly.
+	//   - refresh tokens carry a family_id and must only be redeemed at /refresh
+	//   - OIDC id_tokens carry typ="ID" and are end-client identity assertions,
+	//     never bearer credentials for resource access (RFC 8725 / OAuth BCP)
+	// Direct-login access tokens have neither marker; service tokens carry
+	// typ="Bearer". Both are accepted. (Closes the refresh/id-as-access confusion.)
+	if claims.FamilyID != "" {
+		return nil, fmt.Errorf("refresh token is not an access token")
+	}
+	if claims.Typ == "ID" {
+		return nil, fmt.Errorf("id_token is not an access token")
 	}
 	// Check user-level revocation (admin revoked all sessions)
 	if revoked, _ := h.store.IsUserAccessRevoked(claims.Subject); revoked {
@@ -1520,6 +1544,13 @@ func (h *Handler) verifyAPReq(apReq *krbmsg.APReq, kt *keytab.Keytab) (username,
 		return "", "", fmt.Errorf("AP-REQ verification failed")
 	}
 	cname = creds.CName().PrincipalNameString()
+	// Bind the verified principal to the configured realm. Without this, in an AD
+	// forest / realm-trust topology a foreign-realm "jsmith@OTHER.REALM" verifies
+	// and then maps to the home-realm short name "jsmith", minting a token as that
+	// local user (cross-realm identity hijack, F-kerberos-realm).
+	if realm := h.getKRB5Realm(); realm != "" && !strings.EqualFold(creds.Realm(), realm) {
+		return "", "", fmt.Errorf("client realm %q is not the configured realm %q", creds.Realm(), realm)
+	}
 	username = cname
 	if idx := strings.Index(cname, "@"); idx > 0 {
 		username = cname[:idx]

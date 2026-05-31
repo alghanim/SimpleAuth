@@ -29,11 +29,20 @@ const secretKeyFile = "secret.key"
 // <dataDir>/secret.key, generating it with 0600 perms on first use.
 func loadOrCreateSecretKey(dataDir string) ([]byte, error) {
 	path := filepath.Join(dataDir, secretKeyFile)
-	if data, err := os.ReadFile(path); err == nil {
+	data, err := os.ReadFile(path)
+	if err == nil {
 		if len(data) != 32 {
 			return nil, fmt.Errorf("%s has wrong length %d (want 32)", secretKeyFile, len(data))
 		}
 		return data, nil
+	}
+	// Only generate (and overwrite) when the key genuinely does not exist. Any
+	// other read error (EACCES after a UID change, transient I/O, an unmounted
+	// volume) must NOT fall through to writing a fresh key — that would silently
+	// truncate an existing key and permanently destroy every secret it decrypts
+	// (e.g. stored LDAP bind passwords). Fail closed instead.
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("read %s: %w (refusing to overwrite a possibly-existing key)", secretKeyFile, err)
 	}
 	key := make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {

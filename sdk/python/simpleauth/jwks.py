@@ -17,6 +17,10 @@ from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey, RSAPubli
 
 from .errors import TokenVerificationError
 
+#: Minimum acceptable RSA modulus size in bits. Keys smaller than this are
+#: rejected as too weak to trust for signature verification.
+MIN_RSA_KEY_BITS = 2048
+
 
 def _b64url_to_int(value: str) -> int:
     """Decode a base64url (unpadded) string into a big-endian integer."""
@@ -107,6 +111,11 @@ class JWKSCache:
                 n = _b64url_to_int(jwk["n"])
                 e = _b64url_to_int(jwk["e"])
             except (KeyError, ValueError, TypeError):
+                continue
+            # Reject undersized RSA keys: a modulus below MIN_RSA_KEY_BITS is
+            # not strong enough to trust for signature verification, so we drop
+            # the key rather than caching a weak one.
+            if n.bit_length() < MIN_RSA_KEY_BITS:
                 continue
             public_key = RSAPublicNumbers(e=e, n=n).public_key()
             if kid:

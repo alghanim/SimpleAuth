@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"html"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -44,19 +45,42 @@ func (h *Handler) registerOIDCRoutes() {
 // Respects X-Forwarded-Proto from trusted proxies for correct scheme detection.
 func (h *Handler) oidcBaseURL(r *http.Request) string {
 	scheme := "https"
-	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
-		scheme = proto
-	} else if h.cfg.TLSDisabled {
+	if h.cfg.TLSDisabled {
 		scheme = "http"
 	}
+	// Only honor a forwarded scheme from a trusted proxy, mirroring getClientIP —
+	// otherwise any client could spoof X-Forwarded-Proto.
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" && isTrustedProxy(extractIP(r.RemoteAddr), trustedCIDRs) {
+		scheme = proto
+	}
 	host := r.Host
-	if host == "" {
+	// Pin the host to the configured canonical hostname when the request Host
+	// header does not match it, so the issuer / discovery URLs and the `iss`
+	// claim stamped into every OIDC token cannot be spoofed via an arbitrary
+	// Host header (F23). When r.Host already matches the configured hostname the
+	// request value (with whatever port it carried) is used unchanged.
+	if h.cfg.Hostname != "" && !hostMatches(host, h.cfg.Hostname) {
 		host = h.cfg.Hostname
 		if (scheme == "https" && h.cfg.Port != "443") || (scheme == "http" && h.cfg.Port != "80") {
 			host += ":" + h.cfg.Port
 		}
 	}
+	if host == "" {
+		host = h.cfg.Hostname
+	}
 	return scheme + "://" + host + h.cfg.BasePath
+}
+
+// hostMatches reports whether the request Host (which may include a port) refers
+// to the configured hostname, case-insensitively.
+func hostMatches(reqHost, configured string) bool {
+	if reqHost == "" {
+		return false
+	}
+	if hostOnly, _, err := net.SplitHostPort(reqHost); err == nil {
+		reqHost = hostOnly
+	}
+	return strings.EqualFold(reqHost, configured)
 }
 
 // oidcIssuer returns the OIDC issuer URL (Keycloak-style).
@@ -155,16 +179,15 @@ func verifyPKCE(verifier, challenge, method string) bool {
 	if verifier == "" {
 		return false
 	}
-	switch method {
-	case "S256":
-		sum := sha256.Sum256([]byte(verifier))
-		computed := base64.RawURLEncoding.EncodeToString(sum[:])
-		return subtle.ConstantTimeCompare([]byte(computed), []byte(challenge)) == 1
-	case "", "plain":
-		return subtle.ConstantTimeCompare([]byte(verifier), []byte(challenge)) == 1
-	default:
+	// Only S256 is supported and advertised. "plain"/empty are a downgrade (the
+	// stored challenge equals the verifier in cleartext), so they are rejected
+	// here and at the authorize endpoint (F55).
+	if method != "S256" {
 		return false
 	}
+	sum := sha256.Sum256([]byte(verifier))
+	computed := base64.RawURLEncoding.EncodeToString(sum[:])
+	return subtle.ConstantTimeCompare([]byte(computed), []byte(challenge)) == 1
 }
 
 // handleOIDCAuthorize handles the OAuth2 authorization endpoint.
@@ -177,6 +200,12 @@ func (h *Handler) handleOIDCAuthorize(w http.ResponseWriter, r *http.Request) {
 	// POST — process login form
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "invalid form data", http.StatusBadRequest)
+		return
+	}
+	// Reject cross-origin submissions: the OIDC authorize POST must carry the
+	// __csrf cookie + matching _csrf field issued by showOIDCLoginPage (F30).
+	if !validateCSRF(r) {
+		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 		return
 	}
 
@@ -203,6 +232,12 @@ func (h *Handler) handleOIDCAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 	if redirectURI != "" && !h.appAllowsRedirect(app, redirectURI) {
 		http.Error(w, "redirect_uri not allowed", http.StatusBadRequest)
+		return
+	}
+	// Enforce the single PKCE method we advertise (S256); reject a downgrade to
+	// plain/empty when a challenge is present (F55).
+	if codeChallenge != "" && codeChallengeMethod != "S256" {
+		http.Error(w, "unsupported code_challenge_method (only S256 is supported)", http.StatusBadRequest)
 		return
 	}
 
@@ -249,6 +284,19 @@ func (h *Handler) handleOIDCAuthorize(w http.ResponseWriter, r *http.Request) {
 // login path and the session-cookie fast path. appID binds the code (and the
 // tokens it yields) to the app (v2 audience-scoped tokens).
 func (h *Handler) issueOIDCCodeRedirect(w http.ResponseWriter, r *http.Request, user *store.User, appID, redirectURI, scope, state, nonce, codeChallenge, codeChallengeMethod string) {
+	// When the client omitted redirect_uri, fall back to the APP's OWN first
+	// registered URI — never the global default. Otherwise a named app's code
+	// (and the audience-scoped tokens it yields) is delivered to a cross-app
+	// global URI the app never registered (F28). The resolved value is persisted
+	// into the auth code below so the token-exchange redirect_uri match applies.
+	if redirectURI == "" {
+		if app, err := h.resolveApp(appID); err == nil && len(app.RedirectURIs) > 0 {
+			redirectURI = app.RedirectURIs[0]
+		} else {
+			redirectURI = h.getDefaultRedirectURI()
+		}
+	}
+
 	codeBytes := make([]byte, 32)
 	if _, err := rand.Read(codeBytes); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -274,9 +322,6 @@ func (h *Handler) issueOIDCCodeRedirect(w http.ResponseWriter, r *http.Request, 
 	}
 
 	redirectTarget := redirectURI
-	if redirectTarget == "" {
-		redirectTarget = h.getDefaultRedirectURI()
-	}
 	sep := "?"
 	if strings.Contains(redirectTarget, "?") {
 		sep = "&"
@@ -378,8 +423,15 @@ func (h *Handler) showOIDCLoginPage(w http.ResponseWriter, r *http.Request) {
 	// Escape values reflected into HTML to prevent reflected XSS (M9). ssoLink
 	// is assembled from URL-escaped components above, so it is safe as-is.
 	esc := html.EscapeString
+
+	// CSRF: set a token cookie and embed it as a hidden field so the POST branch
+	// of handleOIDCAuthorize can reject cross-origin form submissions (login CSRF
+	// / session fixation, F30) — mirroring the hosted-login form.
+	csrfToken := generateCSRFToken()
+	h.setCSRFCookie(w, csrfToken)
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, oidcLoginHTML, action, h.oidcClientID(), esc(redirectURI), esc(state), esc(nonce), esc(scope), esc(appName), errorHTML, ssoLink, ssoEnabledStr, autoSSOStr, ssoDelay, esc(codeChallenge), esc(codeChallengeMethod))
+	fmt.Fprintf(w, oidcLoginHTML, action, h.oidcClientID(), esc(redirectURI), esc(state), esc(nonce), esc(scope), esc(appName), errorHTML, ssoLink, ssoEnabledStr, autoSSOStr, ssoDelay, esc(codeChallenge), esc(codeChallengeMethod), esc(csrfToken))
 }
 
 // handleOIDCToken handles the OAuth2 token endpoint.
@@ -554,6 +606,13 @@ func (h *Handler) authenticateConfidentialClient(r *http.Request) (*store.App, e
 }
 
 func (h *Handler) handleOIDCTokenClientCredentials(w http.ResponseWriter, r *http.Request) {
+	// Throttle by IP before the secret check so this grant is not an unthrottled
+	// app_secret brute-force oracle — M16 covered /api/app/token but not this
+	// sibling OIDC surface (F31).
+	if !h.loginLimiter.allow(getClientIP(r)) {
+		oidcError(w, "invalid_request", "too many requests", http.StatusTooManyRequests)
+		return
+	}
 	// client_credentials is a confidential grant — the app authenticates with its
 	// own app_secret (the default client falls back to AUTH_CLIENT_SECRET), so the
 	// minted token is scoped only to an audience the caller can authenticate for
@@ -943,9 +1002,20 @@ func (h *Handler) handleOIDCLogout(w http.ResponseWriter, r *http.Request) {
 		postLogoutURI = r.URL.Query().Get("post_logout_redirect_uri")
 	}
 
+	var hintApp *store.App
 	if idTokenHint != "" {
 		claims, err := h.jwt.ValidateToken(idTokenHint)
-		if err == nil {
+		// Only a genuine ID token may drive session revocation. The previous code
+		// accepted ANY same-key token (access/refresh/app-mgmt), so an attacker
+		// holding any one token for a subject could trigger a global session kill
+		// for that user (F15/F56). An ID token is the RP-initiated-logout hint per
+		// OIDC and is itself proof the user authenticated.
+		if err == nil && claims.Typ == "ID" && claims.FamilyID == "" {
+			if len(claims.Audience) > 0 {
+				if a, aerr := h.resolveApp(claims.Audience[0]); aerr == nil {
+					hintApp = a
+				}
+			}
 			// Revoke all sessions for this user
 			sessions, _ := h.store.ListUserSessions(claims.Subject)
 			for _, s := range sessions {
@@ -960,9 +1030,21 @@ func (h *Handler) handleOIDCLogout(w http.ResponseWriter, r *http.Request) {
 	// Clear cookie on this browser regardless of id_token_hint
 	h.deleteCurrentSession(w, r)
 
+	// Only honor a post-logout redirect the relevant app actually allows;
+	// redirecting to an arbitrary attacker-supplied URI is an open redirect (F27).
 	if postLogoutURI != "" {
-		http.Redirect(w, r, postLogoutURI, http.StatusFound)
-		return
+		app := hintApp
+		if app == nil {
+			if a, err := h.resolveApp(r.URL.Query().Get("client_id")); err == nil {
+				app = a
+			}
+		}
+		if app != nil && h.appAllowsRedirect(app, postLogoutURI) {
+			http.Redirect(w, r, postLogoutURI, http.StatusFound)
+			return
+		}
+		// Not allowed — fall through to the local logged-out page rather than
+		// redirecting to an unvalidated destination.
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -996,7 +1078,8 @@ func oidcError(w http.ResponseWriter, errorCode, description string, status int)
 // oidcLoginHTML format args:
 // %[1]s = form action, %[2]s = client_id, %[3]s = redirect_uri, %[4]s = state,
 // %[5]s = nonce, %[6]s = scope, %[7]s = appName, %[8]s = errorHTML,
-// %[9]s = ssoLink, %[10]s = ssoEnabled ("1"/""), %[11]s = autoSSO ("1"/""), %[12]d = delay
+// %[9]s = ssoLink, %[10]s = ssoEnabled ("1"/""), %[11]s = autoSSO ("1"/""), %[12]d = delay,
+// %[13]s = code_challenge, %[14]s = code_challenge_method, %[15]s = csrf token
 const oidcLoginHTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1082,6 +1165,7 @@ input:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 3px rgba(143,
       <input type="hidden" name="response_type" value="code">
       <input type="hidden" name="code_challenge" value="%[13]s">
       <input type="hidden" name="code_challenge_method" value="%[14]s">
+      <input type="hidden" name="_csrf" value="%[15]s">
       <label>Username</label>
       <input type="text" name="username" placeholder="Enter your username" autofocus required>
       <label>Password</label>

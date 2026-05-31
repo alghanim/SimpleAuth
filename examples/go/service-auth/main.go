@@ -5,17 +5,20 @@
 // service-account login — the recommended SimpleAuth M2M pattern, since a
 // service is just a user. Patterns shown:
 //
-//   1. Obtain a token by logging in as the service account
-//   2. Token caching with automatic renewal
-//   3. HTTP client with auto-injected Bearer token
-//   4. Calling another internal service
+//  1. Obtain a token by logging in as the service account
+//  2. Token caching with automatic renewal
+//  3. HTTP client with auto-injected Bearer token
+//  4. Calling another internal service
 //
 // Usage:
-//   SIMPLEAUTH_SERVICE_USER=billing-svc SIMPLEAUTH_SERVICE_PASSWORD=... go run main.go
+//
+//	SIMPLEAUTH_SERVICE_USER=billing-svc SIMPLEAUTH_SERVICE_PASSWORD=... go run main.go
 //
 // Environment variables:
-//   SIMPLEAUTH_URL, SIMPLEAUTH_SERVICE_USER, SIMPLEAUTH_SERVICE_PASSWORD,
-//   ORDER_SERVICE_URL, SIMPLEAUTH_INSECURE (set "true" to trust self-signed certs)
+//
+//	SIMPLEAUTH_URL, SIMPLEAUTH_SERVICE_USER, SIMPLEAUTH_SERVICE_PASSWORD,
+//	ORDER_SERVICE_URL, SIMPLEAUTH_INSECURE (set "true" to trust self-signed certs)
+//
 // ---------------------------------------------------------------------------
 package main
 

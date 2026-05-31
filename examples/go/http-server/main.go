@@ -12,15 +12,19 @@
 //   - JSON response helpers
 //
 // Usage:
-//   go run main.go
+//
+//	go run main.go
 //
 // Test:
-//   curl http://localhost:8080/health
-//   curl http://localhost:8080/api/profile -H "Authorization: Bearer <token>"
-//   curl http://localhost:8080/api/admin/users -H "Authorization: Bearer <token>"
+//
+//	curl http://localhost:8080/health
+//	curl http://localhost:8080/api/profile -H "Authorization: Bearer <token>"
+//	curl http://localhost:8080/api/admin/users -H "Authorization: Bearer <token>"
 //
 // Environment variables:
-//   SIMPLEAUTH_URL, PORT
+//
+//	SIMPLEAUTH_URL, PORT
+//
 // ---------------------------------------------------------------------------
 package main
 
@@ -59,7 +63,13 @@ func main() {
 	// Initialize SimpleAuth client
 	// -----------------------------------------------------------------
 	auth := simpleauth.New(simpleauth.Options{
-		URL:                envOr("SIMPLEAUTH_URL", "https://auth.corp.local/sauth"),
+		URL: envOr("SIMPLEAUTH_URL", "https://auth.corp.local/sauth"),
+		// Pin the audience (this service's app_id) and issuer so a token minted
+		// for a DIFFERENT app — or by a different issuer — is rejected. In the v2
+		// per-app model the aud claim is the only thing isolating one app's
+		// tokens from another, so a resource server should always set it (F59).
+		Audience:           os.Getenv("SIMPLEAUTH_AUDIENCE"),
+		ExpectedIssuer:     os.Getenv("SIMPLEAUTH_ISSUER"),
 		InsecureSkipVerify: os.Getenv("SIMPLEAUTH_INSECURE") == "true", // dev only: trust self-signed certs
 	})
 
