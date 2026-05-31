@@ -1092,8 +1092,16 @@ func (h *Handler) handleSSOLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	redirectURI := r.URL.Query().Get("redirect_uri")
 
-	// Validate redirect_uri
-	if redirectURI != "" && !isAllowedRedirect(h.getRedirectURIs(), redirectURI) {
+	// Resolve the app (v2) and validate redirect_uri against ITS allowlist — per-app
+	// redirect_uris are authoritative (falling back to the global list). Validating
+	// only against the global list let an app-scoped token be delivered to a URI the
+	// app itself never authorized (L1).
+	app, err := h.resolveApp(r.URL.Query().Get("client_id"))
+	if err != nil {
+		http.Error(w, "unknown app", http.StatusBadRequest)
+		return
+	}
+	if redirectURI != "" && !h.appAllowsRedirect(app, redirectURI) {
 		http.Error(w, "redirect_uri not allowed", http.StatusBadRequest)
 		return
 	}
@@ -1197,13 +1205,7 @@ func (h *Handler) handleSSOLogin(w http.ResponseWriter, r *http.Request) {
 
 	h.assignDefaultRoles(user.GUID)
 
-	// Resolve the app (v2) — optional client_id query, else default app.
-	app, err := h.resolveApp(r.URL.Query().Get("client_id"))
-	if err != nil {
-		h.redirectToLoginError(w, r, redirectURI, "Unknown app")
-		return
-	}
-
+	// app was resolved + redirect validated at the top of the handler (L1).
 	roles, perms, denied := h.resolveTokenRoles(app, user)
 	if denied {
 		h.redirectToLoginError(w, r, redirectURI, "Access denied: not assigned to this app")

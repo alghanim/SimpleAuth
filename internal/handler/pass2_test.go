@@ -79,6 +79,27 @@ func TestH5_RefreshKeepsPerAppScope(t *testing.T) {
 	}
 }
 
+// TestL1_SSORedirectUsesPerAppAllowlist covers Audit Pass 2 / L1: /login/sso must
+// validate redirect_uri against the resolved app's own allowlist, not the global one.
+func TestL1_SSORedirectUsesPerAppAllowlist(t *testing.T) {
+	h, _ := testSetup(t)
+	adm := adminHeaders()
+	doJSON(h, "POST", "/api/admin/apps", map[string]interface{}{
+		"app_id": "portal2", "audience": "portal2",
+		"redirect_uris": []string{"https://portal.example.com/cb"},
+	}, adm)
+
+	// a URI outside portal2's allowlist is rejected up front
+	if w := doJSON(h, "GET", "/login/sso?client_id=portal2&redirect_uri=https://evil.example.com", nil, nil); w.Code != http.StatusBadRequest {
+		t.Fatalf("redirect_uri outside the app's allowlist must be 400, got %d %s", w.Code, w.Body.String())
+	}
+	// a URI in portal2's allowlist passes the redirect check (the flow then continues
+	// past it — Kerberos is unconfigured here, so it is NOT a 400 redirect rejection)
+	if w := doJSON(h, "GET", "/login/sso?client_id=portal2&redirect_uri=https://portal.example.com/cb", nil, nil); w.Code == http.StatusBadRequest {
+		t.Fatalf("redirect_uri inside the app's allowlist must not be rejected, got 400 %s", w.Body.String())
+	}
+}
+
 // TestM16_AppCredentialRateLimit covers Audit Pass 2 / M16: the app_secret surface
 // (token exchange + Basic auth) must be rate-limited to brake brute-force.
 func TestM16_AppCredentialRateLimit(t *testing.T) {
