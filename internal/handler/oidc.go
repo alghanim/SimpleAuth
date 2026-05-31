@@ -603,8 +603,14 @@ func (h *Handler) handleOIDCTokenRefresh(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Refresh stays bound to the same app (v2): re-stamp the original audience,
-	// and re-check per-app authorization (M3).
-	app, _ := h.resolveApp(storedRT.AppID)
+	// and re-check per-app authorization (M3). Resolve the app first so a
+	// disabled/deleted app returns a clean error instead of nil-dereferencing in
+	// resolveTokenRoles (M10).
+	app, err := h.resolveApp(storedRT.AppID)
+	if err != nil {
+		oidcError(w, "invalid_grant", "app unavailable", http.StatusUnauthorized)
+		return
+	}
 	roles, perms, denied := h.resolveTokenRoles(app, user)
 	if denied {
 		oidcError(w, "access_denied", "not assigned to this app", http.StatusForbidden)

@@ -62,7 +62,7 @@ source of truth for what is currently open vs. fixed.
 | H6 | `require_assignment` fails open when an app has no per-app authz | HIGH | FIXED | 2026-05-31 (branch `v2`) |
 | H7 | App-management token accepted as a user access token (no `typ` gate) | HIGH | OPEN | — (v2 branch, pre-release) |
 | H8 | `DeleteApp` orphans app-local users → cross-tenant resurrection on app_id reuse | HIGH | OPEN | — (v2 branch, pre-release) |
-| M10 | OIDC refresh nil-derefs on disabled/deleted app; refresh skips app-disable | MEDIUM | OPEN | — (v2 branch, pre-release) |
+| M10 | OIDC refresh nil-derefs on disabled/deleted app; refresh skips app-disable | MEDIUM | FIXED | 2026-05-31 (branch `v2`) |
 | M11 | OIDC `client_credentials`/`password` use the global secret but mint any app's `aud` | MEDIUM | OPEN | — (v2 branch, pre-release) |
 | M12 | Kerberos auto-provision binding hijack via app-set `email`/`display_name` | MEDIUM | OPEN | — (v2 branch, pre-release) |
 | M13 | Group list never cleared when a user leaves all directory groups (stale roles) | MEDIUM | OPEN | — (v2 branch, pre-release) |

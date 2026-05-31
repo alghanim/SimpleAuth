@@ -71,6 +71,41 @@ func TestH5_RefreshKeepsPerAppScope(t *testing.T) {
 	}
 }
 
+// TestM10_DisabledAppStopsRefresh covers Audit Pass 2 / M10: refreshing a token
+// whose app has been disabled/deleted must return a clean error, not mint a token
+// (the disable kill switch) and not nil-deref/500 in resolveTokenRoles.
+func TestM10_DisabledAppStopsRefresh(t *testing.T) {
+	h, s := testSetup(t)
+	adm := adminHeaders()
+
+	w := doJSON(h, "POST", "/api/admin/apps", map[string]interface{}{
+		"app_id": "shop", "audience": "shop", "allow_local_users": true,
+	}, adm)
+	var app map[string]interface{}
+	parseJSON(t, w, &app)
+	secret := app["app_secret"].(string)
+	doJSON(h, "POST", "/api/app/users", map[string]interface{}{"username": "shopper", "password": "shoppass1"}, basicAuth("shop", secret))
+
+	w = doJSON(h, "POST", "/api/auth/login", map[string]interface{}{
+		"username": "shopper", "password": "shoppass1", "app_id": "shop",
+	}, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("login: %d %s", w.Code, w.Body.String())
+	}
+	var tok map[string]interface{}
+	parseJSON(t, w, &tok)
+
+	// disable the app, then refresh -> clean 401, no 500/panic
+	sa, _ := s.GetApp("shop")
+	sa.Disabled = true
+	if err := s.UpdateApp(sa); err != nil {
+		t.Fatalf("disable app: %v", err)
+	}
+	if w := doJSON(h, "POST", "/api/auth/refresh", map[string]interface{}{"refresh_token": tok["refresh_token"].(string)}, nil); w.Code != http.StatusUnauthorized {
+		t.Fatalf("refresh into a disabled app must be 401, got %d %s", w.Code, w.Body.String())
+	}
+}
+
 // TestH6_RequireAssignmentFailsClosed covers Audit Pass 2 / H6: an app that sets
 // require_assignment=true but has NOT defined any per-app authz must DENY directory
 // users (fail closed), not fall back to admitting them with their global roles.
