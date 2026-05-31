@@ -82,7 +82,11 @@ func TestH5_RefreshKeepsPerAppScope(t *testing.T) {
 // and password reset must enforce the configured password policy.
 func TestM15_AppLocalPasswordPolicy(t *testing.T) {
 	h, _ := testSetup(t)
-	h.cfg.PasswordMinLength = 10
+	// the effective policy comes from the runtime-settings cache (seeded from cfg
+	// at construction), so bump it there rather than on cfg.
+	rs := h.runtimeSettings.get()
+	rs.PasswordMinLength = 10
+	h.runtimeSettings.set(rs)
 	adm := adminHeaders()
 	w := doJSON(h, "POST", "/api/admin/apps", map[string]interface{}{
 		"app_id": "pol", "audience": "pol", "allow_local_users": true,
