@@ -101,6 +101,7 @@ func MigrateToPostgres(source *BoltStore, target *PostgresStore, statusCh chan<-
 		{"revoked_users", bucketRevokedUsers},
 		{"apps", bucketApps},
 		{"app_authz", bucketAppAuthz},
+		{"app_admins", bucketAppAdmins},
 	}
 
 	sourceCounts := map[string]int64{}
@@ -164,6 +165,7 @@ func MigrateToPostgres(source *BoltStore, target *PostgresStore, statusCh chan<-
 		"revoked_users":     "sa_revoked_users",
 		"apps":              "sa_apps",
 		"app_authz":         "sa_app_authz",
+		"app_admins":        "sa_app_admins",
 	}
 	for boltName, pgTable := range verifyMap {
 		expected := sourceCounts[boltName]
@@ -251,6 +253,13 @@ func migrateKV(target *PostgresStore, table string, k, v []byte) error {
 	case "app_authz":
 		_, err := target.db.Exec(`INSERT INTO sa_app_authz (app_id, data) VALUES ($1, $2) ON CONFLICT (app_id) DO UPDATE SET data = $2`, key, v)
 		return err
+	case "app_admins":
+		var a AppAdmin
+		if err := json.Unmarshal(v, &a); err != nil {
+			return nil
+		}
+		_, err := target.db.Exec(`INSERT INTO sa_app_admins (app_id, user_guid, added_by, added_at) VALUES ($1, $2, $3, $4) ON CONFLICT (app_id, user_guid) DO NOTHING`, a.AppID, a.UserGUID, a.AddedBy, a.AddedAt)
+		return err
 	default:
 		return nil
 	}
@@ -283,6 +292,7 @@ func MigrateFromPostgres(source *PostgresStore, target *BoltStore, statusCh chan
 		{"revoked_users", "sa_revoked_users", `SELECT user_guid, expires_at FROM sa_revoked_users`},
 		{"apps", "sa_apps", `SELECT app_id, data FROM sa_apps`},
 		{"app_authz", "sa_app_authz", `SELECT app_id, data FROM sa_app_authz`},
+		{"app_admins", "sa_app_admins", `SELECT app_id, user_guid, added_by, added_at FROM sa_app_admins`},
 	}
 
 	// Count totals
@@ -307,7 +317,7 @@ func MigrateFromPostgres(source *PostgresStore, target *BoltStore, statusCh chan
 		bucketUserRoles, bucketUserPermissions, bucketConfig,
 		bucketRefreshTokens, bucketAuditLog, bucketOIDCAuthCodes,
 		bucketSessions, bucketRevokedTokens, bucketRevokedUsers,
-		bucketApps, bucketAppAuthz,
+		bucketApps, bucketAppAuthz, bucketAppAdmins,
 	}
 	if err := target.db.Update(func(tx *bolt.Tx) error {
 		for _, name := range migratedBuckets {
@@ -432,6 +442,14 @@ func MigrateFromPostgres(source *PostgresStore, target *BoltStore, statusCh chan
 				rows.Scan(&appID, &data)
 				writeErr = target.db.Update(func(tx *bolt.Tx) error {
 					return tx.Bucket(bucketAppAuthz).Put([]byte(appID), data)
+				})
+			case "app_admins":
+				var appID, guid, addedBy string
+				var addedAt time.Time
+				rows.Scan(&appID, &guid, &addedBy, &addedAt)
+				data, _ := json.Marshal(&AppAdmin{AppID: appID, UserGUID: guid, AddedBy: addedBy, AddedAt: addedAt})
+				writeErr = target.db.Update(func(tx *bolt.Tx) error {
+					return tx.Bucket(bucketAppAdmins).Put(appAdminKey(appID, guid), data)
 				})
 			}
 			if writeErr != nil {

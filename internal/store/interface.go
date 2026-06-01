@@ -47,6 +47,14 @@ type Store interface {
 	// returns a non-nil zero-value AppAuthz when none is stored.
 	GetAppAuthz(appID string) (*AppAuthz, error)
 	SaveAppAuthz(authz *AppAuthz) error
+	// Per-app admins (human users who manage an app's self-service surface with
+	// their own login). Membership is atomic and independent of AppAuthz: Add and
+	// Remove are single-statement, IsAppAdmin is a point lookup. UserGUID is the
+	// canonical key (callers resolve usernames to a GUID before granting).
+	AddAppAdmin(appID, userGUID, addedBy string) error
+	RemoveAppAdmin(appID, userGUID string) error
+	IsAppAdmin(appID, userGUID string) (bool, error)
+	ListAppAdmins(appID string) ([]*AppAdmin, error)
 
 	// LDAP Config
 	GetLDAPConfig() (*LDAPConfig, error)
