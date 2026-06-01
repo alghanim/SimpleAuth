@@ -112,6 +112,13 @@ func (s *PostgresStore) migrate() error {
 		app_id TEXT PRIMARY KEY,
 		data JSONB NOT NULL
 	);
+	CREATE TABLE IF NOT EXISTS sa_app_admins (
+		app_id TEXT NOT NULL,
+		user_guid TEXT NOT NULL,
+		added_by TEXT,
+		added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		PRIMARY KEY (app_id, user_guid)
+	);
 	`
 	_, err := s.db.Exec(schema)
 	return err
@@ -199,6 +206,10 @@ func (s *PostgresStore) DeleteApp(appID string) error {
 	if _, err := tx.Exec(`DELETE FROM sa_app_authz WHERE app_id = $1`, appID); err != nil {
 		return err
 	}
+	// Cascade: drop the app's admins so a reused app_id cannot resurrect them.
+	if _, err := tx.Exec(`DELETE FROM sa_app_admins WHERE app_id = $1`, appID); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -213,6 +224,43 @@ func (s *PostgresStore) GetAppAuthz(appID string) (*AppAuthz, error) {
 		return nil, err
 	}
 	return authz, json.Unmarshal(data, authz)
+}
+
+func (s *PostgresStore) AddAppAdmin(appID, userGUID, addedBy string) error {
+	_, err := s.db.Exec(
+		`INSERT INTO sa_app_admins (app_id, user_guid, added_by, added_at) VALUES ($1, $2, $3, $4) ON CONFLICT (app_id, user_guid) DO NOTHING`,
+		appID, userGUID, addedBy, time.Now().UTC())
+	return err
+}
+
+func (s *PostgresStore) RemoveAppAdmin(appID, userGUID string) error {
+	_, err := s.db.Exec(`DELETE FROM sa_app_admins WHERE app_id = $1 AND user_guid = $2`, appID, userGUID)
+	return err
+}
+
+func (s *PostgresStore) IsAppAdmin(appID, userGUID string) (bool, error) {
+	var ok bool
+	err := s.db.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM sa_app_admins WHERE app_id = $1 AND user_guid = $2)`,
+		appID, userGUID).Scan(&ok)
+	return ok, err
+}
+
+func (s *PostgresStore) ListAppAdmins(appID string) ([]*AppAdmin, error) {
+	rows, err := s.db.Query(`SELECT app_id, user_guid, added_by, added_at FROM sa_app_admins WHERE app_id = $1 ORDER BY added_at`, appID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*AppAdmin
+	for rows.Next() {
+		a := &AppAdmin{}
+		if err := rows.Scan(&a.AppID, &a.UserGUID, &a.AddedBy, &a.AddedAt); err != nil {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }
 
 func (s *PostgresStore) SaveAppAuthz(authz *AppAuthz) error {

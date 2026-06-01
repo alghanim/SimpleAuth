@@ -31,6 +31,7 @@ var (
 	bucketSessions          = []byte("sessions")
 	bucketApps              = []byte("apps")
 	bucketAppAuthz          = []byte("app_authz")
+	bucketAppAdmins         = []byte("app_admins")
 )
 
 // BoltStore implements the Store interface using BoltDB (bbolt).
@@ -184,8 +185,24 @@ func (s *BoltStore) DeleteApp(appID string) error {
 		if err := tx.Bucket(bucketApps).Delete([]byte(appID)); err != nil {
 			return err
 		}
-		// Cascade: drop the app's authorization data too.
-		return tx.Bucket(bucketAppAuthz).Delete([]byte(appID))
+		// Cascade: drop the app's authorization data.
+		if err := tx.Bucket(bucketAppAuthz).Delete([]byte(appID)); err != nil {
+			return err
+		}
+		// Cascade: drop the app's admins so a reused app_id cannot resurrect them.
+		admins := tx.Bucket(bucketAppAdmins)
+		prefix := appID + "\x00"
+		var adminKeys [][]byte
+		c := admins.Cursor()
+		for k, _ := c.Seek([]byte(prefix)); k != nil && strings.HasPrefix(string(k), prefix); k, _ = c.Next() {
+			adminKeys = append(adminKeys, append([]byte(nil), k...))
+		}
+		for _, k := range adminKeys {
+			if err := admins.Delete(k); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 
@@ -214,6 +231,58 @@ func (s *BoltStore) SaveAppAuthz(authz *AppAuthz) error {
 	})
 }
 
+// appAdminKey is the (app_id, user_guid) membership key. The NUL separator can't
+// appear in an app_id or a UUID, so prefix scans by "app_id\x00" are unambiguous.
+func appAdminKey(appID, userGUID string) []byte {
+	return []byte(appID + "\x00" + userGUID)
+}
+
+func (s *BoltStore) AddAppAdmin(appID, userGUID, addedBy string) error {
+	return s.update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketAppAdmins)
+		key := appAdminKey(appID, userGUID)
+		if b.Get(key) != nil {
+			return nil // already an admin — preserve the original AddedBy/AddedAt
+		}
+		data, err := json.Marshal(&AppAdmin{AppID: appID, UserGUID: userGUID, AddedBy: addedBy, AddedAt: time.Now().UTC()})
+		if err != nil {
+			return err
+		}
+		return b.Put(key, data)
+	})
+}
+
+func (s *BoltStore) RemoveAppAdmin(appID, userGUID string) error {
+	return s.update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketAppAdmins).Delete(appAdminKey(appID, userGUID))
+	})
+}
+
+func (s *BoltStore) IsAppAdmin(appID, userGUID string) (bool, error) {
+	var ok bool
+	err := s.view(func(tx *bolt.Tx) error {
+		ok = tx.Bucket(bucketAppAdmins).Get(appAdminKey(appID, userGUID)) != nil
+		return nil
+	})
+	return ok, err
+}
+
+func (s *BoltStore) ListAppAdmins(appID string) ([]*AppAdmin, error) {
+	var out []*AppAdmin
+	prefix := appID + "\x00"
+	err := s.view(func(tx *bolt.Tx) error {
+		c := tx.Bucket(bucketAppAdmins).Cursor()
+		for k, v := c.Seek([]byte(prefix)); k != nil && strings.HasPrefix(string(k), prefix); k, v = c.Next() {
+			a := &AppAdmin{}
+			if json.Unmarshal(v, a) == nil {
+				out = append(out, a)
+			}
+		}
+		return nil
+	})
+	return out, err
+}
+
 func (s *BoltStore) init() error {
 	return s.update(func(tx *bolt.Tx) error {
 		for _, b := range [][]byte{
@@ -228,6 +297,7 @@ func (s *BoltStore) init() error {
 			bucketSessions,
 			bucketApps,
 			bucketAppAuthz,
+			bucketAppAdmins,
 		} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err

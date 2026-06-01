@@ -143,7 +143,7 @@ func (h *Handler) handleSetOwnAuthz(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "failed to save authz", http.StatusInternalServerError)
 		return
 	}
-	h.audit("app_authz_updated", appID, getClientIP(r), map[string]interface{}{"app_id": appID, "via": "self"})
+	h.audit("app_authz_updated", h.appActor(r), getClientIP(r), map[string]interface{}{"app_id": appID, "actor_kind": h.appActorKind(r)})
 	jsonResp(w, &authz, http.StatusOK)
 }
 
@@ -186,7 +186,7 @@ func (h *Handler) handleAppBootstrap(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "bootstrap failed", http.StatusInternalServerError)
 		return
 	}
-	h.audit("app_bootstrap", appID, getClientIP(r), map[string]interface{}{"app_id": appID})
+	h.audit("app_bootstrap", h.appActor(r), getClientIP(r), map[string]interface{}{"app_id": appID, "actor_kind": h.appActorKind(r)})
 	jsonResp(w, map[string]interface{}{
 		"status":            "ok",
 		"app_id":            appID,
@@ -279,7 +279,7 @@ func (h *Handler) handleCreateLocalUser(w http.ResponseWriter, r *http.Request) 
 		authz.UserAssignments[req.Username] = req.Roles
 		h.store.SaveAppAuthz(authz)
 	}
-	h.audit("app_local_user_created", appID, getClientIP(r), map[string]interface{}{"app_id": appID, "username": req.Username})
+	h.audit("app_local_user_created", h.appActor(r), getClientIP(r), map[string]interface{}{"app_id": appID, "username": req.Username, "actor_kind": h.appActorKind(r)})
 	jsonResp(w, map[string]interface{}{"guid": u.GUID, "username": req.Username, "owner_app_id": appID}, http.StatusCreated)
 }
 
@@ -334,7 +334,7 @@ func (h *Handler) handleDeleteLocalUser(w http.ResponseWriter, r *http.Request) 
 			}
 		}
 	}
-	h.audit("app_local_user_deleted", appID, getClientIP(r), map[string]interface{}{"app_id": appID, "guid": guid})
+	h.audit("app_local_user_deleted", h.appActor(r), getClientIP(r), map[string]interface{}{"app_id": appID, "guid": guid, "actor_kind": h.appActorKind(r)})
 	jsonResp(w, map[string]string{"status": "deleted"}, http.StatusOK)
 }
 
@@ -369,6 +369,6 @@ func (h *Handler) handleSetLocalUserPassword(w http.ResponseWriter, r *http.Requ
 		jsonError(w, "failed to update password", http.StatusInternalServerError)
 		return
 	}
-	h.audit("app_local_user_password_reset", appID, getClientIP(r), map[string]interface{}{"app_id": appID, "guid": guid})
+	h.audit("app_local_user_password_reset", h.appActor(r), getClientIP(r), map[string]interface{}{"app_id": appID, "guid": guid, "actor_kind": h.appActorKind(r)})
 	jsonResp(w, map[string]string{"status": "password updated"}, http.StatusOK)
 }

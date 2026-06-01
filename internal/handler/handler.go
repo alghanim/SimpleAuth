@@ -255,6 +255,10 @@ func (h *Handler) registerRoutes(uiFS fs.FS) {
 	h.mux.HandleFunc("POST /api/admin/apps/{app_id}/rotate-secret", h.requireMasterAdmin(h.handleRotateAppSecret))
 	h.mux.HandleFunc("GET /api/admin/apps/{app_id}/authz", h.requireMasterAdmin(h.handleGetAppAuthz))
 	h.mux.HandleFunc("PUT /api/admin/apps/{app_id}/authz", h.requireMasterAdmin(h.handleSetAppAuthz))
+	// Per-app admins (human users who manage an app with their own login).
+	h.mux.HandleFunc("GET /api/admin/apps/{app_id}/admins", h.requireMasterAdmin(h.handleListAppAdminsMaster))
+	h.mux.HandleFunc("POST /api/admin/apps/{app_id}/admins", h.requireMasterAdmin(h.handleAddAppAdminMaster))
+	h.mux.HandleFunc("DELETE /api/admin/apps/{app_id}/admins/{user}", h.requireMasterAdmin(h.handleRemoveAppAdminMaster))
 
 	// App self-service (v2) — authed by app_id/app_secret (Basic) or an
 	// app-management token from POST /api/app/token. Scoped to the calling app.
@@ -268,6 +272,26 @@ func (h *Handler) registerRoutes(uiFS fs.FS) {
 	h.mux.HandleFunc("GET /api/app/users", h.requireApp(h.handleListLocalUsers))
 	h.mux.HandleFunc("DELETE /api/app/users/{guid}", h.requireApp(h.handleDeleteLocalUser))
 	h.mux.HandleFunc("PUT /api/app/users/{guid}/password", h.requireApp(h.handleSetLocalUserPassword))
+	// App admins — only the app-secret holder (here) or the master admin may
+	// add/remove them (a per-app admin themselves cannot, by decision).
+	h.mux.HandleFunc("GET /api/app/admins", h.requireApp(h.handleListOwnAdmins))
+	h.mux.HandleFunc("POST /api/app/admins", h.requireApp(h.handleAddOwnAdmin))
+	h.mux.HandleFunc("DELETE /api/app/admins/{user}", h.requireApp(h.handleRemoveOwnAdmin))
+
+	// Per-app admin surface (v2): a human app admin manages an app with their OWN
+	// login. Per-app login model — the app is the one the caller logged into
+	// (token Azp), not a path parameter, so a token can only manage its own app.
+	// Reuses the self-service handlers — requireAppAdmin sets app_id in context
+	// from the token. Separate /api/app-admin/ prefix keeps it off the
+	// credential-scoped /api/app/ surface.
+	h.mux.HandleFunc("GET /api/app-admin/authz", h.requireAppAdmin(h.handleGetOwnAuthz))
+	h.mux.HandleFunc("PUT /api/app-admin/authz", h.requireAppAdmin(h.handleSetOwnAuthz))
+	h.mux.HandleFunc("POST /api/app-admin/bootstrap", h.requireAppAdmin(h.handleAppBootstrap))
+	h.mux.HandleFunc("GET /api/app-admin/settings", h.requireAppAdmin(h.handleAppSettings))
+	h.mux.HandleFunc("POST /api/app-admin/users", h.requireAppAdmin(h.handleCreateLocalUser))
+	h.mux.HandleFunc("GET /api/app-admin/users", h.requireAppAdmin(h.handleListLocalUsers))
+	h.mux.HandleFunc("DELETE /api/app-admin/users/{guid}", h.requireAppAdmin(h.handleDeleteLocalUser))
+	h.mux.HandleFunc("PUT /api/app-admin/users/{guid}/password", h.requireAppAdmin(h.handleSetLocalUserPassword))
 
 	// Admin: Bootstrap
 	h.mux.HandleFunc("POST /api/admin/bootstrap", h.requireMasterAdmin(h.handleBootstrap))

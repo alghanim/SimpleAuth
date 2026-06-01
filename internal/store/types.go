@@ -51,6 +51,19 @@ type AppAuthz struct {
 	GroupAssignments map[string][]string `json:"group_assignments,omitempty"`
 }
 
+// AppAdmin is a human user authorized to administer one app's self-service
+// surface (its authz + app-local users) with their own login, instead of the
+// app secret. Membership is stored as one row/entry per (AppID, UserGUID) — NOT
+// inside the AppAuthz blob — so grants/revokes are atomic and the self-service
+// authz writes can never clobber them. UserGUID is the strong, non-spoofable key
+// (resolved at grant time); AddedBy records the granting principal for audit.
+type AppAdmin struct {
+	AppID    string    `json:"app_id"`
+	UserGUID string    `json:"user_guid"`
+	AddedBy  string    `json:"added_by"`
+	AddedAt  time.Time `json:"added_at"`
+}
+
 type LDAPConfig struct {
 	URL           string `json:"url"`
 	BaseDN        string `json:"base_dn"`

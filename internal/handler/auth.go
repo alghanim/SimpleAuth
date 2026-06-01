@@ -400,6 +400,10 @@ func (h *Handler) issueTokenPair(user *store.User, roles []string, perms []strin
 	if app != nil {
 		aud = appAudience(app)
 		claims.Audience = []string{aud}
+		// Azp = the app's stable, unique id (distinct from the free-form, possibly
+		// non-unique audience). The per-app-admin gate binds on this so a token can
+		// only act as a management token when minted for the exact management app.
+		claims.Azp = app.AppID
 	}
 
 	accessToken, err := h.jwt.IssueAccessToken(claims, h.cfg.AccessTTL)
