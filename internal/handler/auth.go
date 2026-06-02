@@ -86,9 +86,6 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Assign default roles if user has none
-	h.assignDefaultRoles(finalUser.GUID)
-
 	log.Printf("[login] Success user=%q guid=%s name=%q ip=%s", req.Username, finalUser.GUID, finalUser.DisplayName, ip)
 
 	// Check force password change — still issue tokens but flag the response
@@ -436,19 +433,6 @@ func (h *Handler) issueTokenPair(user *store.User, roles []string, perms []strin
 	return accessToken, refreshToken, int(h.cfg.AccessTTL.Seconds()), nil
 }
 
-// assignDefaultRoles assigns default roles if the user has no roles yet.
-func (h *Handler) assignDefaultRoles(userGUID string) {
-	existingRoles, _ := h.store.GetUserRoles(userGUID)
-	if len(existingRoles) > 0 {
-		return
-	}
-
-	defaults, _ := h.store.GetDefaultRoles()
-	if len(defaults) > 0 {
-		h.store.SetUserRoles(userGUID, defaults)
-	}
-}
-
 // resolvePreferredUsername finds the username for a user from identity mappings.
 // Priority: local mapping > ldap mapping > email > display name.
 func (h *Handler) resolvePreferredUsername(user *store.User) string {
@@ -470,13 +454,6 @@ func (h *Handler) resolvePreferredUsername(user *store.User) string {
 		return user.Email
 	}
 	return user.DisplayName
-}
-
-// resolveUserPermissions returns the merged set of role-derived + direct permissions.
-func (h *Handler) resolveUserPermissions(userGUID string, roles []string) []string {
-	directPerms, _ := h.store.GetUserPermissions(userGUID)
-	merged, _ := h.store.ResolvePermissions(roles, directPerms)
-	return merged
 }
 
 func (h *Handler) handleRefresh(w http.ResponseWriter, r *http.Request) {
@@ -964,9 +941,6 @@ func (h *Handler) handleNegotiate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Assign default roles if user has none
-	h.assignDefaultRoles(user.GUID)
-
 	// Resolve the app (v2) — optional client_id query, else default app.
 	app, err := h.resolveApp(r.URL.Query().Get("client_id"))
 	if err != nil {
@@ -1240,8 +1214,6 @@ func (h *Handler) handleSSOLogin(w http.ResponseWriter, r *http.Request) {
 		h.redirectToLoginError(w, r, redirectURI, "Account disabled")
 		return
 	}
-
-	h.assignDefaultRoles(user.GUID)
 
 	// app was resolved + redirect validated at the top of the handler (L1).
 	roles, perms, denied := h.resolveTokenRoles(app, user)

@@ -187,9 +187,6 @@ func (h *Handler) handleHostedLoginSubmit(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Assign default roles if needed
-	h.assignDefaultRoles(user.GUID)
-
 	// Issue tokens (per-app roles + require_assignment, v2 M3)
 	roles, perms, denied := h.resolveTokenRoles(app, user)
 	if denied {

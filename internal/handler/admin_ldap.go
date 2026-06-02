@@ -497,9 +497,6 @@ func (h *Handler) handleImportLDAPUsers(w http.ResponseWriter, r *http.Request) 
 		// Create LDAP identity mapping
 		h.store.SetIdentityMapping("ldap", username, user.GUID)
 
-		// Assign default roles
-		h.assignDefaultRoles(user.GUID)
-
 		h.audit("ldap_user_imported", user.GUID, getClientIP(r), map[string]interface{}{
 			"username": username, "display_name": ldapUser.DisplayName,
 		})

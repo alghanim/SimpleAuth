@@ -120,9 +120,28 @@ func (h *Handler) handleAppToken(w http.ResponseWriter, r *http.Request) {
 	}, http.StatusOK)
 }
 
+// defaultAppAuthzForbidden writes a 403 and returns true when appID is the
+// default ("home") app. The home app's authorization is the v1 global world —
+// managed via the Roles & Permissions catalog + per-user roles, NOT the per-app
+// authz surface (resolveTokenRoles ignores the home app's AppAuthz). Refusing
+// these writes/reads keeps a holder of the legacy client secret (or a home-app
+// admin) from clobbering or reading the directory's home-app role data through a
+// surface that has no effect anyway.
+func (h *Handler) defaultAppAuthzForbidden(w http.ResponseWriter, appID string) bool {
+	if appID == h.defaultAppID() {
+		jsonError(w, "the default app is managed via Roles & Permissions and per-user roles, not the per-app authz surface", http.StatusForbidden)
+		return true
+	}
+	return false
+}
+
 // handleGetOwnAuthz returns the calling app's authorization. GET /api/app/authz
 func (h *Handler) handleGetOwnAuthz(w http.ResponseWriter, r *http.Request) {
-	authz, err := h.store.GetAppAuthz(appIDFromContext(r))
+	appID := appIDFromContext(r)
+	if h.defaultAppAuthzForbidden(w, appID) {
+		return
+	}
+	authz, err := h.store.GetAppAuthz(appID)
 	if err != nil {
 		jsonError(w, "failed to read authz", http.StatusInternalServerError)
 		return
@@ -133,6 +152,9 @@ func (h *Handler) handleGetOwnAuthz(w http.ResponseWriter, r *http.Request) {
 // handleSetOwnAuthz replaces the calling app's authorization. PUT /api/app/authz
 func (h *Handler) handleSetOwnAuthz(w http.ResponseWriter, r *http.Request) {
 	appID := appIDFromContext(r)
+	if h.defaultAppAuthzForbidden(w, appID) {
+		return
+	}
 	var authz store.AppAuthz
 	if err := readJSON(r, &authz); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
@@ -152,6 +174,9 @@ func (h *Handler) handleSetOwnAuthz(w http.ResponseWriter, r *http.Request) {
 // on every deploy. POST /api/app/bootstrap
 func (h *Handler) handleAppBootstrap(w http.ResponseWriter, r *http.Request) {
 	appID := appIDFromContext(r)
+	if h.defaultAppAuthzForbidden(w, appID) {
+		return
+	}
 	var req struct {
 		Roles           []string            `json:"roles"`
 		Permissions     []string            `json:"permissions"`
