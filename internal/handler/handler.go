@@ -255,6 +255,15 @@ func (h *Handler) registerRoutes(uiFS fs.FS) {
 	h.mux.HandleFunc("POST /api/admin/apps/{app_id}/rotate-secret", h.requireMasterAdmin(h.handleRotateAppSecret))
 	h.mux.HandleFunc("GET /api/admin/apps/{app_id}/authz", h.requireMasterAdmin(h.handleGetAppAuthz))
 	h.mux.HandleFunc("PUT /api/admin/apps/{app_id}/authz", h.requireMasterAdmin(h.handleSetAppAuthz))
+	// Standalone->central migration: a master mints a single-use token on the
+	// target app; the standalone uses it to authenticate the cross-install
+	// preflight/commit (those are token-authed, not master-key/session authed).
+	h.mux.HandleFunc("POST /api/admin/apps/{app_id}/migration-token", h.requireMasterAdmin(h.handleGenMigrationToken))
+	h.mux.HandleFunc("POST /api/migration/preflight", h.handleMigrationPreflight)
+	h.mux.HandleFunc("POST /api/migration/commit", h.handleMigrationCommit)
+	// Standalone side: package this deployment and push it to a central app.
+	h.mux.HandleFunc("POST /api/admin/migrate-to-central/preflight", h.requireMasterAdmin(h.handleMigrateToCentralPreflight))
+	h.mux.HandleFunc("POST /api/admin/migrate-to-central/commit", h.requireMasterAdmin(h.handleMigrateToCentralCommit))
 	// Per-app admins (human users who manage an app with their own login).
 	h.mux.HandleFunc("GET /api/admin/apps/{app_id}/admins", h.requireMasterAdmin(h.handleListAppAdminsMaster))
 	h.mux.HandleFunc("POST /api/admin/apps/{app_id}/admins", h.requireMasterAdmin(h.handleAddAppAdminMaster))
