@@ -207,6 +207,19 @@ func TestClassify_FreshTargetGuard(t *testing.T) {
 	}
 }
 
+// TestClassify_FreshTargetGuard_Groups: a target configured with only GROUP
+// assignments (no user assignments) is still in-use and must be protected.
+func TestClassify_FreshTargetGuard_Groups(t *testing.T) {
+	central := open(t)
+	must(t, central.CreateApp(&store.App{AppID: "billing", Audience: "billing"}))
+	must(t, central.SaveAppAuthz(&store.AppAuthz{AppID: "billing", GroupAssignments: map[string][]string{"Finance": {"viewer"}}}))
+	b := &Bundle{SchemaRev: SchemaRev, Users: []UserEntry{{Kind: KindLocal, Key: "bob", Roles: []string{"r"}, PasswordHash: "h"}}}
+	rep, _ := Classify(b, central, "billing")
+	if rep.OK() {
+		t.Fatal("classify must block a target that has group assignments")
+	}
+}
+
 func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {

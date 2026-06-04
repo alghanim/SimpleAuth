@@ -211,9 +211,10 @@ func Classify(b *Bundle, central store.Store, targetAppID string) (*Report, erro
 	r := &Report{SourceVersion: b.SourceVersion, TargetApp: targetAppID, RedirectURIsToReview: b.App.RedirectURIs}
 
 	// Fresh-target guard: Apply wholesale-replaces the target's authz, so refuse a
-	// target that already has per-app authorization (existing assignments/roles).
-	// Migrate into a freshly-created app to avoid clobbering an in-use one.
-	if cur, _ := central.GetAppAuthz(targetAppID); cur != nil && (len(cur.UserAssignments) > 0 || len(cur.RolePermissions) > 0 || len(cur.Roles) > 0) {
+	// target that already has ANY per-app authorization — user OR group
+	// assignments, roles, role→perm map, or a permission catalog. Migrate into a
+	// freshly-created app to avoid clobbering an in-use one.
+	if cur, _ := central.GetAppAuthz(targetAppID); cur != nil && (len(cur.UserAssignments) > 0 || len(cur.GroupAssignments) > 0 || len(cur.RolePermissions) > 0 || len(cur.Roles) > 0 || len(cur.Permissions) > 0) {
 		r.Blocked = append(r.Blocked, BlockedUser{Key: targetAppID, Reason: "target app already has authorization configured — migrate into a freshly-created app"})
 		return r, nil
 	}

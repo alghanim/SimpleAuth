@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -97,19 +98,27 @@ func (h *Handler) authMigration(r *http.Request, app *store.App) bool {
 	return subtle.ConstantTimeCompare([]byte(rec.Hash), []byte(hashMigrationToken(tok))) == 1
 }
 
-func (h *Handler) consumeMigrationToken(appID string) {
+// consumeMigrationToken marks the token used. It returns an error if the claim
+// could not be persisted, so the caller can fail closed BEFORE applying (a
+// silently-failed consume would otherwise leave the token replayable).
+func (h *Handler) consumeMigrationToken(appID string) error {
 	data, err := h.store.GetConfigValue(migrationTokenKey(appID))
-	if err != nil || len(data) == 0 {
-		return
+	if err != nil {
+		return err
+	}
+	if len(data) == 0 {
+		return fmt.Errorf("token not found")
 	}
 	var rec migrationTokenRecord
-	if json.Unmarshal(data, &rec) != nil {
-		return
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return err
 	}
 	rec.Used = true
-	if data, err := json.Marshal(rec); err == nil {
-		h.store.SetConfigValue(migrationTokenKey(appID), data)
+	out, err := json.Marshal(rec)
+	if err != nil {
+		return err
 	}
+	return h.store.SetConfigValue(migrationTokenKey(appID), out)
 }
 
 type migrationRequest struct {
@@ -139,17 +148,16 @@ func (h *Handler) guardMigrationCall(w http.ResponseWriter, r *http.Request) (*m
 		jsonError(w, "the default app cannot be a migration target", http.StatusForbidden)
 		return nil, false
 	}
+	// Authenticate BEFORE revealing any app state: a missing app and a bad token
+	// both return the same 401, so an unauthenticated caller can't enumerate which
+	// app_ids exist. Disabled is only reported once the token is valid.
 	app, err := h.store.GetApp(req.AppID)
-	if err != nil {
-		jsonError(w, "target app not found", http.StatusNotFound)
+	if err != nil || !h.authMigration(r, app) {
+		jsonError(w, "invalid or expired migration token", http.StatusUnauthorized)
 		return nil, false
 	}
 	if app.Disabled {
 		jsonError(w, "target app is disabled", http.StatusForbidden)
-		return nil, false
-	}
-	if !h.authMigration(r, app) {
-		jsonError(w, "invalid or expired migration token", http.StatusUnauthorized)
 		return nil, false
 	}
 	return &req, true
@@ -194,17 +202,23 @@ func (h *Handler) handleMigrationCommit(w http.ResponseWriter, r *http.Request) 
 		jsonResp(w, map[string]interface{}{"error": "migration has blocked users — resolve them first", "report": rep}, http.StatusConflict)
 		return
 	}
-	// Consume the token BEFORE Apply: a partially-applied (non-transactional)
-	// commit must not leave a replayable token — mint a fresh one to retry.
-	h.consumeMigrationToken(req.AppID)
+	// Claim the token BEFORE Apply: a partially-applied (non-transactional) commit
+	// must not leave a replayable token. Fail closed if the claim can't persist.
+	if err := h.consumeMigrationToken(req.AppID); err != nil {
+		jsonError(w, "could not claim the migration token — retry", http.StatusInternalServerError)
+		return
+	}
 
 	// Apply provisions app-local users (check-then-create); take localUserMu so it
-	// can't race a concurrent self-service local-user create on the same app.
-	h.localUserMu.Lock()
-	res, err := migrate.Apply(req.Bundle, h.store, req.AppID, req.CarrySecret)
-	h.localUserMu.Unlock()
+	// can't race a concurrent self-service local-user create on the same app. The
+	// deferred unlock (in a closure) survives a panic inside Apply.
+	res, err := func() (*migrate.ApplyResult, error) {
+		h.localUserMu.Lock()
+		defer h.localUserMu.Unlock()
+		return migrate.Apply(req.Bundle, h.store, req.AppID, req.CarrySecret)
+	}()
 	if err != nil {
-		jsonError(w, "commit failed (token spent — mint a new one to retry): "+err.Error(), http.StatusInternalServerError)
+		jsonError(w, "commit failed (token spent; if the target was partially written, clear it before retrying with a new token): "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	h.audit("migration_committed", "migration:"+req.AppID, getClientIP(r), map[string]interface{}{
