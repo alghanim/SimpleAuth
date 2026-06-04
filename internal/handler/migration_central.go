@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"simpleauth/internal/migrate"
+	"simpleauth/internal/store"
 )
 
 // --- Central side: receive a standalone deployment as a named app ---
@@ -27,6 +28,10 @@ type migrationTokenRecord struct {
 	Hash      string    `json:"hash"`
 	ExpiresAt time.Time `json:"expires_at"`
 	Used      bool      `json:"used"`
+	// AppCreatedAt binds the token to this app INSTANCE: if the app_id is deleted
+	// and re-registered, the new app has a different CreatedAt and the old token
+	// no longer authenticates (it would otherwise take over an unrelated new app).
+	AppCreatedAt time.Time `json:"app_created_at"`
 }
 
 func migrationTokenKey(appID string) string { return "migration_token:" + appID }
@@ -44,7 +49,8 @@ func (h *Handler) handleGenMigrationToken(w http.ResponseWriter, r *http.Request
 		jsonError(w, "the default app cannot be a migration target", http.StatusForbidden)
 		return
 	}
-	if _, err := h.store.GetApp(appID); err != nil {
+	app, err := h.store.GetApp(appID)
+	if err != nil {
 		jsonError(w, "app not found", http.StatusNotFound)
 		return
 	}
@@ -55,7 +61,7 @@ func (h *Handler) handleGenMigrationToken(w http.ResponseWriter, r *http.Request
 		return
 	}
 	raw := "sa_mig_" + base64.RawURLEncoding.EncodeToString(b)
-	rec := migrationTokenRecord{Hash: hashMigrationToken(raw), ExpiresAt: time.Now().UTC().Add(migrationTokenTTL)}
+	rec := migrationTokenRecord{Hash: hashMigrationToken(raw), ExpiresAt: time.Now().UTC().Add(migrationTokenTTL), AppCreatedAt: app.CreatedAt}
 	data, _ := json.Marshal(rec)
 	if err := h.store.SetConfigValue(migrationTokenKey(appID), data); err != nil {
 		jsonError(w, "failed to store token", http.StatusInternalServerError)
@@ -69,14 +75,15 @@ func (h *Handler) handleGenMigrationToken(w http.ResponseWriter, r *http.Request
 	}, http.StatusOK)
 }
 
-// authMigration validates the bearer migration token against appID. It never
-// reveals which check failed (uniform false), and is constant-time on the hash.
-func (h *Handler) authMigration(r *http.Request, appID string) bool {
+// authMigration validates the bearer migration token against the target app. It
+// never reveals which check failed (uniform false), is constant-time on the hash,
+// and rejects a token whose app instance (CreatedAt) no longer matches.
+func (h *Handler) authMigration(r *http.Request, app *store.App) bool {
 	tok := extractBearerToken(r)
-	if tok == "" || appID == "" {
+	if tok == "" || app == nil {
 		return false
 	}
-	data, err := h.store.GetConfigValue(migrationTokenKey(appID))
+	data, err := h.store.GetConfigValue(migrationTokenKey(app.AppID))
 	if err != nil || len(data) == 0 {
 		return false
 	}
@@ -84,7 +91,7 @@ func (h *Handler) authMigration(r *http.Request, appID string) bool {
 	if json.Unmarshal(data, &rec) != nil {
 		return false
 	}
-	if rec.Used || time.Now().UTC().After(rec.ExpiresAt) {
+	if rec.Used || time.Now().UTC().After(rec.ExpiresAt) || !rec.AppCreatedAt.Equal(app.CreatedAt) {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(rec.Hash), []byte(hashMigrationToken(tok))) == 1
@@ -124,10 +131,6 @@ func (h *Handler) guardMigrationCall(w http.ResponseWriter, r *http.Request) (*m
 		jsonError(w, "invalid request body", http.StatusBadRequest)
 		return nil, false
 	}
-	if !h.authMigration(r, req.AppID) {
-		jsonError(w, "invalid or expired migration token", http.StatusUnauthorized)
-		return nil, false
-	}
 	if req.Bundle.SchemaRev != migrate.SchemaRev {
 		jsonError(w, "incompatible migration bundle — upgrade the older deployment first", http.StatusBadRequest)
 		return nil, false
@@ -136,8 +139,17 @@ func (h *Handler) guardMigrationCall(w http.ResponseWriter, r *http.Request) (*m
 		jsonError(w, "the default app cannot be a migration target", http.StatusForbidden)
 		return nil, false
 	}
-	if _, err := h.store.GetApp(req.AppID); err != nil {
+	app, err := h.store.GetApp(req.AppID)
+	if err != nil {
 		jsonError(w, "target app not found", http.StatusNotFound)
+		return nil, false
+	}
+	if app.Disabled {
+		jsonError(w, "target app is disabled", http.StatusForbidden)
+		return nil, false
+	}
+	if !h.authMigration(r, app) {
+		jsonError(w, "invalid or expired migration token", http.StatusUnauthorized)
 		return nil, false
 	}
 	return &req, true
@@ -161,6 +173,12 @@ func (h *Handler) handleMigrationPreflight(w http.ResponseWriter, r *http.Reques
 // handleMigrationCommit applies the bundle and consumes the token. It re-runs the
 // classifier and refuses if any user is blocked. POST /api/migration/commit
 func (h *Handler) handleMigrationCommit(w http.ResponseWriter, r *http.Request) {
+	// Serialize commits so the token-claim and Apply are atomic: a second
+	// concurrent commit blocks here, then fails auth once the token is consumed —
+	// closing the TOCTOU that would otherwise allow a double import.
+	h.migrationMu.Lock()
+	defer h.migrationMu.Unlock()
+
 	req, ok := h.guardMigrationCall(w, r)
 	if !ok {
 		return
@@ -171,15 +189,24 @@ func (h *Handler) handleMigrationCommit(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if !rep.OK() {
+		// Nothing is applied, so leave the token usable for a retry after the
+		// operator resolves the blocked users.
 		jsonResp(w, map[string]interface{}{"error": "migration has blocked users — resolve them first", "report": rep}, http.StatusConflict)
 		return
 	}
+	// Consume the token BEFORE Apply: a partially-applied (non-transactional)
+	// commit must not leave a replayable token — mint a fresh one to retry.
+	h.consumeMigrationToken(req.AppID)
+
+	// Apply provisions app-local users (check-then-create); take localUserMu so it
+	// can't race a concurrent self-service local-user create on the same app.
+	h.localUserMu.Lock()
 	res, err := migrate.Apply(req.Bundle, h.store, req.AppID, req.CarrySecret)
+	h.localUserMu.Unlock()
 	if err != nil {
-		jsonError(w, "commit failed: "+err.Error(), http.StatusInternalServerError)
+		jsonError(w, "commit failed (token spent — mint a new one to retry): "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	h.consumeMigrationToken(req.AppID) // single-use
 	h.audit("migration_committed", "migration:"+req.AppID, getClientIP(r), map[string]interface{}{
 		"app_id": req.AppID, "assignments": res.AssignmentsSet, "local_users": res.LocalUsersCreated,
 	})

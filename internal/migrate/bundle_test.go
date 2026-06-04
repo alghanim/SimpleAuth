@@ -180,6 +180,33 @@ func TestClassify_DifferentAD_BlocksADUsers(t *testing.T) {
 	}
 }
 
+// TestApply_DoesNotDowngradeRequireAssignment: a source home app with the gate
+// OFF must not relax a target the operator deliberately locked down.
+func TestApply_DoesNotDowngradeRequireAssignment(t *testing.T) {
+	central := open(t)
+	must(t, central.CreateApp(&store.App{AppID: "payroll", Audience: "payroll", RequireAssignment: true}))
+	b := &Bundle{SchemaRev: SchemaRev, App: AppConfig{RequireAssignment: false}}
+	if _, err := Apply(b, central, "payroll", false); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if app, _ := central.GetApp("payroll"); !app.RequireAssignment {
+		t.Fatal("migration must not downgrade require_assignment from true to false")
+	}
+}
+
+// TestClassify_FreshTargetGuard: refuse to migrate into an app that already has
+// per-app authorization (would clobber an in-use app).
+func TestClassify_FreshTargetGuard(t *testing.T) {
+	central := open(t)
+	must(t, central.CreateApp(&store.App{AppID: "billing", Audience: "billing"}))
+	must(t, central.SaveAppAuthz(&store.AppAuthz{AppID: "billing", UserAssignments: map[string][]string{"x": {"r"}}}))
+	b := &Bundle{SchemaRev: SchemaRev, Users: []UserEntry{{Kind: KindLocal, Key: "bob", Roles: []string{"r"}, PasswordHash: "h"}}}
+	rep, _ := Classify(b, central, "billing")
+	if rep.OK() {
+		t.Fatal("classify must block a non-empty target app")
+	}
+}
+
 func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {

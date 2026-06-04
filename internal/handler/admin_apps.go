@@ -222,6 +222,7 @@ func (h *Handler) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "failed to delete app", http.StatusInternalServerError)
 		return
 	}
+	h.store.DeleteConfigValue(migrationTokenKey(appID)) // don't leave a token that could re-target a recreated id
 	h.audit("app_deleted", "admin", getClientIP(r), map[string]interface{}{"app_id": appID})
 	jsonResp(w, map[string]string{"status": "deleted"}, http.StatusOK)
 }
@@ -250,6 +251,7 @@ func (h *Handler) handleRotateAppSecret(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, "failed to rotate secret", http.StatusInternalServerError)
 		return
 	}
+	h.store.DeleteConfigValue(migrationTokenKey(a.AppID)) // rotating credentials invalidates a pending migration token
 	h.audit("app_secret_rotated", "admin", getClientIP(r), map[string]interface{}{"app_id": a.AppID})
 	jsonResp(w, map[string]interface{}{"app_id": a.AppID, "app_secret": secret}, http.StatusOK)
 }

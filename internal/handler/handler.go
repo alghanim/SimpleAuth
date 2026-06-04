@@ -34,6 +34,9 @@ type Handler struct {
 	// localUserMu serializes app-local user provisioning so the existence check
 	// and the create+mapping are atomic (L3).
 	localUserMu sync.Mutex
+	// migrationMu serializes a migration commit's token-claim + Apply + consume so
+	// the single-use token cannot be raced into a double import.
+	migrationMu sync.Mutex
 }
 
 func New(cfg *config.Config, s store.Store, jwtMgr *auth.JWTManager, uiFS fs.FS, version string) *Handler {

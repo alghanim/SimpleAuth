@@ -210,6 +210,14 @@ func (r *Report) OK() bool { return len(r.Blocked) == 0 }
 func Classify(b *Bundle, central store.Store, targetAppID string) (*Report, error) {
 	r := &Report{SourceVersion: b.SourceVersion, TargetApp: targetAppID, RedirectURIsToReview: b.App.RedirectURIs}
 
+	// Fresh-target guard: Apply wholesale-replaces the target's authz, so refuse a
+	// target that already has per-app authorization (existing assignments/roles).
+	// Migrate into a freshly-created app to avoid clobbering an in-use one.
+	if cur, _ := central.GetAppAuthz(targetAppID); cur != nil && (len(cur.UserAssignments) > 0 || len(cur.RolePermissions) > 0 || len(cur.Roles) > 0) {
+		r.Blocked = append(r.Blocked, BlockedUser{Key: targetAppID, Reason: "target app already has authorization configured — migrate into a freshly-created app"})
+		return r, nil
+	}
+
 	centralLDAP, _ := central.GetLDAPConfig()
 	centralHasAD := centralLDAP != nil && (centralLDAP.Domain != "" || centralLDAP.BaseDN != "")
 	sameAD := centralHasAD && b.SourceAD != nil && sameADDomain(b.SourceAD, centralLDAP)
@@ -295,7 +303,10 @@ func Apply(b *Bundle, central store.Store, targetAppID string, carrySecret bool)
 	if len(b.App.CORSOrigins) > 0 {
 		app.CORSOrigins = b.App.CORSOrigins
 	}
-	app.RequireAssignment = b.App.RequireAssignment
+	// Never WEAKEN the target's access gate via a migration: OR-in only. A target
+	// the operator deliberately created with require_assignment=true must not be
+	// downgraded to open by a source home app that ran with it off.
+	app.RequireAssignment = app.RequireAssignment || b.App.RequireAssignment
 	if carrySecret && b.App.SecretHash != "" {
 		app.SecretHash = b.App.SecretHash
 	}

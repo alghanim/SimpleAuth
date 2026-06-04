@@ -188,3 +188,55 @@ func TestMigrationEndToEnd(t *testing.T) {
 		t.Fatalf("bob not materialized on central: %+v", cu)
 	}
 }
+
+// TestMigrationHTTPSRequired: the standalone refuses to push the directory (which
+// carries password hashes) to a cleartext http:// non-loopback central.
+func TestMigrationHTTPSRequired(t *testing.T) {
+	h, _ := testSetup(t)
+	w := doJSON(h, "POST", "/api/admin/migrate-to-central/preflight", map[string]interface{}{
+		"central_url": "http://central.evil.example", "app_id": "billing", "token": "sa_mig_x",
+	}, adminHeaders())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("cleartext http to non-loopback must be rejected, got %d %s", w.Code, w.Body.String())
+	}
+}
+
+// TestMigrationTokenInvalidatedOnDelete: a token minted on an app does not survive
+// the app being deleted and the id re-registered.
+func TestMigrationTokenInvalidatedOnDelete(t *testing.T) {
+	h, _ := testSetup(t)
+	adm := adminHeaders()
+	doJSON(h, "POST", "/api/admin/apps", map[string]interface{}{"app_id": "billing", "audience": "billing"}, adm)
+	w := doJSON(h, "POST", "/api/admin/apps/billing/migration-token", nil, adm)
+	var tr map[string]interface{}
+	parseJSON(t, w, &tr)
+	token := tr["migration_token"].(string)
+
+	doJSON(h, "DELETE", "/api/admin/apps/billing", nil, adm)
+	doJSON(h, "POST", "/api/admin/apps", map[string]interface{}{"app_id": "billing", "audience": "billing"}, adm)
+
+	body := map[string]interface{}{"app_id": "billing", "bundle": &migrate.Bundle{SchemaRev: migrate.SchemaRev}}
+	if w := doJSON(h, "POST", "/api/migration/commit", body, bearer(token)); w.Code != http.StatusUnauthorized {
+		t.Fatalf("old token on a recreated app must 401, got %d %s", w.Code, w.Body.String())
+	}
+}
+
+// TestMigrationDisabledTarget: committing into a disabled app is refused.
+func TestMigrationDisabledTarget(t *testing.T) {
+	h, s := testSetup(t)
+	adm := adminHeaders()
+	doJSON(h, "POST", "/api/admin/apps", map[string]interface{}{"app_id": "billing", "audience": "billing"}, adm)
+	w := doJSON(h, "POST", "/api/admin/apps/billing/migration-token", nil, adm)
+	var tr map[string]interface{}
+	parseJSON(t, w, &tr)
+	token := tr["migration_token"].(string)
+
+	app, _ := s.GetApp("billing")
+	app.Disabled = true
+	s.UpdateApp(app)
+
+	body := map[string]interface{}{"app_id": "billing", "bundle": &migrate.Bundle{SchemaRev: migrate.SchemaRev}}
+	if w := doJSON(h, "POST", "/api/migration/commit", body, bearer(token)); w.Code != http.StatusForbidden {
+		t.Fatalf("commit into a disabled app must 403, got %d %s", w.Code, w.Body.String())
+	}
+}

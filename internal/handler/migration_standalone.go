@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -20,8 +22,26 @@ import (
 // directory (incl. local-user password hashes) crosses this link, so it goes over
 // the operator-supplied URL with TLS verification ON (default http.Client).
 
-// migrationHTTP is the outbound client for cross-install calls.
-var migrationHTTP = &http.Client{Timeout: 60 * time.Second}
+// migrationHTTP is the outbound client for cross-install calls. It refuses to
+// follow redirects: a migration target must not bounce us (a redirect could
+// downgrade https->http or steer the directory bundle to an unintended host).
+var migrationHTTP = &http.Client{
+	Timeout: 60 * time.Second,
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		return fmt.Errorf("central must not redirect")
+	},
+}
+
+// isLoopbackHost reports whether host is localhost / a loopback IP.
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
+}
 
 type migrateOutboundReq struct {
 	CentralURL  string `json:"central_url"`
@@ -39,8 +59,15 @@ func (h *Handler) callCentral(w http.ResponseWriter, r *http.Request, path strin
 		return
 	}
 	base := strings.TrimRight(strings.TrimSpace(req.CentralURL), "/")
-	if !strings.HasPrefix(base, "https://") && !strings.HasPrefix(base, "http://") {
-		jsonError(w, "central URL must start with http:// or https://", http.StatusBadRequest)
+	u, err := url.Parse(base)
+	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
+		jsonError(w, "central URL must be a valid http(s) URL", http.StatusBadRequest)
+		return
+	}
+	// The bundle carries local-user password hashes + the app secret hash, so it
+	// must not cross the network in cleartext: require https for non-loopback.
+	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
+		jsonError(w, "central URL must use https:// (http is only allowed to localhost)", http.StatusBadRequest)
 		return
 	}
 
