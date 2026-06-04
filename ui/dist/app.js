@@ -46,6 +46,7 @@ const icons = {
   database: html`<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>`,
   settings: html`<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`,
   apps: html`<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>`,
+  migrate: html`<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h12"/><path d="M13 6l6 6-6 6"/><path d="M21 4v16"/></svg>`,
 };
 
 // === Toast ===
@@ -1951,6 +1952,7 @@ function AppsPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [form, setForm] = useState({ app_id: '', name: '', audience: '', require_assignment: false, allow_local_users: false });
   const [secretModal, setSecretModal] = useState(null);
+  const [tokenModal, setTokenModal] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [authzApp, setAuthzApp] = useState(null);
   const [authz, setAuthz] = useState(null);
@@ -1976,6 +1978,11 @@ function AppsPage() {
 
   const rotate = async (id) => {
     try { const res = await api('POST', `/api/admin/apps/${id}/rotate-secret`); setSecretModal({ app_id: res.app_id, app_secret: res.app_secret }); }
+    catch (e) { showToast(e.message, 'error'); }
+  };
+
+  const genMigrationToken = async (id) => {
+    try { const res = await api('POST', `/api/admin/apps/${id}/migration-token`); setTokenModal(res); }
     catch (e) { showToast(e.message, 'error'); }
   };
 
@@ -2026,6 +2033,7 @@ function AppsPage() {
                 <td style="text-align:right;white-space:nowrap">
                   <button class="btn btn-sm btn-secondary" onClick=${() => openAuthz(app.app_id)}>Authz</button>
                   <button class="btn btn-sm btn-secondary" onClick=${() => rotate(app.app_id)}>Rotate secret</button>
+                  <button class="btn btn-sm btn-secondary" title="Mint a single-use token for a standalone deployment migrating into this app" onClick=${() => genMigrationToken(app.app_id)}>Migrate token</button>
                   <button class="btn btn-sm btn-danger" onClick=${() => setConfirmDelete(app.app_id)}>Delete</button>
                 </td>
               </tr>
@@ -2059,6 +2067,19 @@ function AppsPage() {
           </div>
         </div>
         <div style="display:flex;justify-content:flex-end;margin-top:var(--sp-4)"><button class="btn btn-primary" onClick=${() => setSecretModal(null)}>Done</button></div>
+      </${Modal}>
+    `}
+
+    ${tokenModal && html`
+      <${Modal} title="Migration token — shown once" onClose=${() => setTokenModal(null)}>
+        <p style="color:var(--text-muted)">Give this to the standalone deployment migrating into <code>${tokenModal.app_id}</code>. It is single-use and expires ${new Date(tokenModal.expires_at).toLocaleString()}.</p>
+        <div class="form-group"><label>migration token</label>
+          <div style="display:flex;gap:var(--sp-2)">
+            <input class="form-input" readonly value=${tokenModal.migration_token} style="font-family:monospace" />
+            <button class="btn btn-sm btn-secondary" onClick=${() => copy(tokenModal.migration_token)}>${icons.copy} Copy</button>
+          </div>
+        </div>
+        <div style="display:flex;justify-content:flex-end;margin-top:var(--sp-4)"><button class="btn btn-primary" onClick=${() => setTokenModal(null)}>Done</button></div>
       </${Modal}>
     `}
 
@@ -2162,6 +2183,76 @@ function AppAuthzEditor({ appId, initial, onSave, onClose }) {
   `;
 }
 
+function MigratePage() {
+  const [f, setF] = useState({ central_url: '', app_id: '', token: '', carry_secret: true });
+  const [report, setReport] = useState(null);
+  const [result, setResult] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const card = 'border:1px solid var(--border-default);border-radius:8px;padding:var(--sp-4);max-width:680px;background:var(--bg-elevated,transparent)';
+
+  const preflight = async () => {
+    setBusy(true); setError(''); setResult(null);
+    try { setReport(await api('POST', '/api/admin/migrate-to-central/preflight', f)); }
+    catch (e) { setError(e.message); setReport(null); }
+    finally { setBusy(false); }
+  };
+  const commit = async () => {
+    setBusy(true); setError('');
+    try { setResult(await api('POST', '/api/admin/migrate-to-central/commit', f)); setReport(null); }
+    catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+
+  const blocked = report && report.blocked && report.blocked.length > 0;
+
+  return html`
+    <div class="page-header"><h2>Migrate to central</h2></div>
+    <p style="color:var(--text-muted);margin:0 0 var(--sp-4);max-width:680px">Move this standalone deployment into a single app on a central SimpleAuth. On the central: create the target app, then use its <strong>Migrate token</strong> button. Enter the details below — <strong>Preflight is a dry run</strong>; nothing changes until you commit.</p>
+
+    <div style="${card}">
+      <div class="form-group"><label>Central URL</label><input class="form-input" value=${f.central_url} onInput=${e => setF({ ...f, central_url: e.target.value })} placeholder="https://auth.central.example" /></div>
+      <div class="form-group"><label>Target app ID</label><input class="form-input" value=${f.app_id} onInput=${e => setF({ ...f, app_id: e.target.value })} placeholder="billing" /></div>
+      <div class="form-group"><label>Migration token</label><input class="form-input" style="font-family:monospace" value=${f.token} onInput=${e => setF({ ...f, token: e.target.value })} placeholder="sa_mig_…" /></div>
+      <div class="form-group"><label><input type="checkbox" checked=${f.carry_secret} onChange=${e => setF({ ...f, carry_secret: e.target.checked })} /> Carry app secret (consumer apps keep their existing secret)</label></div>
+      <div style="display:flex;gap:var(--sp-2)">
+        <button class="btn btn-secondary" disabled=${busy || !f.central_url || !f.app_id || !f.token} onClick=${preflight}>${busy ? 'Working…' : 'Preflight (dry run)'}</button>
+        ${report && !blocked && html`<button class="btn btn-primary" disabled=${busy} onClick=${commit}>Commit migration</button>`}
+      </div>
+      ${error && html`<p style="color:var(--danger,#c0392b);margin:var(--sp-3) 0 0">${error}</p>`}
+    </div>
+
+    ${report && html`
+      <div style="${card};margin-top:var(--sp-4)">
+        <h3 style="margin-top:0">Dry-run report</h3>
+        <ul style="line-height:1.8;margin:0">
+          <li><strong>${report.ad_users_same_domain || 0}</strong> AD user(s) — same AD, re-bound on login${report.ad_users_known ? ` (${report.ad_users_known} already in the central directory)` : ''}</li>
+          <li><strong>${report.local_users || 0}</strong> local user(s) — created on the target app with their existing password</li>
+          ${blocked
+      ? html`<li style="color:var(--danger,#c0392b)"><strong>${report.blocked.length}</strong> blocked — resolve before committing</li>`
+      : html`<li style="color:var(--success,#2e7d32)">No blocked users ✓</li>`}
+        </ul>
+        ${blocked && html`<div class="table-wrap" style="margin-top:var(--sp-2)"><table><thead><tr><th>User</th><th>Reason</th></tr></thead><tbody>${report.blocked.map(b => html`<tr><td><code>${b.key}</code></td><td>${b.reason}</td></tr>`)}</tbody></table></div>`}
+        ${report.redirect_uris_to_review && report.redirect_uris_to_review.length > 0 && html`<div style="margin-top:var(--sp-3)"><strong>Review redirect URIs</strong> (will be allowlisted on the central):<ul style="margin:var(--sp-1) 0 0">${report.redirect_uris_to_review.map(u => html`<li><code>${u}</code></li>`)}</ul></div>`}
+        ${report.notes && report.notes.length > 0 && html`<div style="margin-top:var(--sp-3)">${report.notes.map(n => html`<p style="color:var(--text-muted);margin:var(--sp-1) 0">⚠ ${n}</p>`)}</div>`}
+      </div>
+    `}
+
+    ${result && html`
+      <div style="${card};margin-top:var(--sp-4)">
+        <h3 style="margin-top:0;color:var(--success,#2e7d32)">Migration committed ✓</h3>
+        <ul style="line-height:1.8;margin:0">
+          <li>${result.assignments_set} assignment(s) set</li>
+          <li>${result.local_users_created} local user(s) created</li>
+          <li>${result.roles_defined} role(s) defined on the target app</li>
+        </ul>
+        <p style="color:var(--text-muted);margin-top:var(--sp-3)">Now point your consumer apps at the central's URL. Their client_id, audience, redirect URI${f.carry_secret ? ', and secret are' : ' are'} unchanged — only the issuer/JWKS change, handled automatically by OIDC discovery.</p>
+      </div>
+    `}
+  `;
+}
+
 function App() {
   const [page, setPage] = useState('dashboard');
   const [authed, setAuthed] = useState(!!getApiKey());
@@ -2224,6 +2315,7 @@ function App() {
     { id: 'audit', label: 'Audit Log', icon: icons.audit },
     { id: 'settings', label: 'Settings', icon: icons.settings },
     { id: 'database', label: 'Database', icon: icons.database },
+    { id: 'migrate', label: 'Migrate', icon: icons.migrate },
   ];
 
   const pages = {
@@ -2237,6 +2329,7 @@ function App() {
     audit: AuditPage,
     settings: SettingsPage,
     database: DatabasePage,
+    migrate: MigratePage,
   };
 
   const PageComponent = pages[page] || Dashboard;
