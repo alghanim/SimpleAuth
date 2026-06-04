@@ -463,6 +463,8 @@ func (h *Handler) handleResolveMapping(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleGetRoles(w http.ResponseWriter, r *http.Request) {
 	guid := pathParam(r, "guid")
+	// Per-user global roles = the user's roles in the default ("home") app (v2).
+	// Named apps manage their own assignments via the per-app authz editor.
 	roles, err := h.store.GetUserRoles(guid)
 	if err != nil {
 		jsonError(w, "failed to get roles", http.StatusInternalServerError)
@@ -1036,7 +1038,7 @@ func (h *Handler) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Set roles
+		// Set roles (the user's home-app roles, in the global per-user store)
 		if u.Roles != nil {
 			if err := h.store.SetUserRoles(guid, u.Roles); err != nil {
 				jsonError(w, fmt.Sprintf("failed to set roles for %s: %v", u.Username, err), http.StatusBadRequest)

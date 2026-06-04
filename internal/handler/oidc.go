@@ -266,9 +266,6 @@ func (h *Handler) handleOIDCAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Assign default roles
-	h.assignDefaultRoles(user.GUID)
-
 	// Seed shared SSO session cookie (no-op if feature disabled)
 	h.issueSessionCookie(w, r, user.GUID)
 
@@ -554,9 +551,6 @@ func (h *Handler) handleOIDCTokenPassword(w http.ResponseWriter, r *http.Request
 		oidcError(w, "invalid_grant", "account disabled", http.StatusUnauthorized)
 		return
 	}
-
-	// Assign default roles
-	h.assignDefaultRoles(user.GUID)
 
 	log.Printf("[oidc] Password grant success user=%q guid=%s app=%q ip=%s", username, user.GUID, app.AppID, ip)
 	h.issueOIDCTokens(w, r, user, scope, "", app)

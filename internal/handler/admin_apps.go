@@ -77,6 +77,13 @@ func (h *Handler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "app_id must be 1-64 chars: lowercase letters, digits, '-' or '_' (or provide a name)", http.StatusBadRequest)
 		return
 	}
+	// The default app's id is reserved: a named app with that id would be routed
+	// through the home-app branch of resolveTokenRoles (its per-app authz ignored,
+	// global roles leaked). The default app is created only by ensureDefaultApp.
+	if appID == h.defaultAppID() {
+		jsonError(w, "app_id is reserved for the default app", http.StatusBadRequest)
+		return
+	}
 	audience := strings.TrimSpace(req.Audience)
 	if audience == "" {
 		audience = appID
@@ -180,6 +187,13 @@ func (h *Handler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		a.RequireAssignment = *req.RequireAssignment
 	}
 	if req.AllowLocalUsers != nil {
+		// The default app is the global directory; "app-local users" there would get
+		// role assignments written into its AppAuthz, which the home-app token path
+		// ignores (dead config). Directory users are created via /api/admin/users.
+		if *req.AllowLocalUsers && a.AppID == h.defaultAppID() {
+			jsonError(w, "the default app cannot enable local users (it is the global directory)", http.StatusBadRequest)
+			return
+		}
 		a.AllowLocalUsers = *req.AllowLocalUsers
 	}
 	if req.Disabled != nil {
@@ -196,10 +210,19 @@ func (h *Handler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 // handleDeleteApp removes an app. DELETE /api/admin/apps/{app_id}
 func (h *Handler) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 	appID := pathParam(r, "app_id")
+	// The default ("home") app is first-class and undeletable: it is the global
+	// directory and the target of every app-less token request. Deleting it would
+	// also free its id for re-registration as a named app (which resolveTokenRoles
+	// would then route through the home-app branch — leaking global roles).
+	if appID == h.defaultAppID() {
+		jsonError(w, "the default app cannot be deleted", http.StatusForbidden)
+		return
+	}
 	if err := h.store.DeleteApp(appID); err != nil {
 		jsonError(w, "failed to delete app", http.StatusInternalServerError)
 		return
 	}
+	h.store.DeleteConfigValue(migrationTokenKey(appID)) // don't leave a token that could re-target a recreated id
 	h.audit("app_deleted", "admin", getClientIP(r), map[string]interface{}{"app_id": appID})
 	jsonResp(w, map[string]string{"status": "deleted"}, http.StatusOK)
 }
@@ -228,6 +251,7 @@ func (h *Handler) handleRotateAppSecret(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, "failed to rotate secret", http.StatusInternalServerError)
 		return
 	}
+	h.store.DeleteConfigValue(migrationTokenKey(a.AppID)) // rotating credentials invalidates a pending migration token
 	h.audit("app_secret_rotated", "admin", getClientIP(r), map[string]interface{}{"app_id": a.AppID})
 	jsonResp(w, map[string]interface{}{"app_id": a.AppID, "app_secret": secret}, http.StatusOK)
 }
@@ -237,6 +261,11 @@ func (h *Handler) handleRotateAppSecret(w http.ResponseWriter, r *http.Request) 
 // GET /api/admin/apps/{app_id}/authz
 func (h *Handler) handleGetAppAuthz(w http.ResponseWriter, r *http.Request) {
 	appID := pathParam(r, "app_id")
+	// The default app's authz is not its token source (the home app reads global
+	// roles); refuse the per-app authz surface for it, matching the PUT guard.
+	if h.defaultAppAuthzForbidden(w, appID) {
+		return
+	}
 	if _, err := h.store.GetApp(appID); err != nil {
 		jsonError(w, "app not found", http.StatusNotFound)
 		return
@@ -253,6 +282,12 @@ func (h *Handler) handleGetAppAuthz(w http.ResponseWriter, r *http.Request) {
 // PUT /api/admin/apps/{app_id}/authz
 func (h *Handler) handleSetAppAuthz(w http.ResponseWriter, r *http.Request) {
 	appID := pathParam(r, "app_id")
+	// The default ("home") app's roles live in the global per-user store, not its
+	// AppAuthz (resolveTokenRoles ignores the home app's AppAuthz). Writing it here
+	// would be dead config, so refuse it and point to the right surface.
+	if h.defaultAppAuthzForbidden(w, appID) {
+		return
+	}
 	if _, err := h.store.GetApp(appID); err != nil {
 		jsonError(w, "app not found", http.StatusNotFound)
 		return
