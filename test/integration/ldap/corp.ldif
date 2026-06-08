@@ -5,10 +5,15 @@ dn: ou=users,dc=corp,dc=local
 objectClass: organizationalUnit
 ou: users
 
+# bob is a member of the "Finance" group. We carry group membership in the `ou`
+# attribute (user-settable, multi-valued) and point SimpleAuth's groups_attr at
+# `ou`, so we don't need the OpenLDAP memberof overlay in the fixture. SimpleAuth's
+# group->role resolution is attribute-agnostic, so this exercises the same path.
 dn: uid=bob,ou=users,dc=corp,dc=local
 objectClass: inetOrgPerson
 cn: Bob Builder
 sn: Builder
 uid: bob
 mail: bob@corp.local
+ou: Finance
 userPassword: bobpass

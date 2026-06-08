@@ -164,4 +164,20 @@ func TestMoreScenarios(t *testing.T) {
 		}
 		t.Log("OK mixed_population: AD (policy-only) + local (carried hash) migrated together; both authenticate on central")
 	})
+
+	// An AD user gets a role on a central app purely via GROUP membership (no
+	// per-user assignment) — bob is in "Finance" (his ou attr; see ldap/corp.ldif).
+	t.Run("group_to_role", func(t *testing.T) {
+		central.must(t, "POST", "/api/admin/apps", map[string]any{"app_id": "fin", "audience": "fin"})
+		central.must(t, "PUT", "/api/admin/apps/fin/authz", map[string]any{
+			"roles":             []string{"analyst"},
+			"role_permissions":  map[string][]string{"analyst": {"fin:read"}},
+			"group_assignments": map[string][]string{"Finance": {"analyst"}},
+		})
+		roles, perms, _ := tokenClaims(t, loginRetry(t, central, "bob", "bobpass", "fin"))
+		if !has(roles, "analyst") || !has(perms, "fin:read") {
+			t.Fatalf("group->role: bob via Finance should be analyst/fin:read; got roles=%v perms=%v", roles, perms)
+		}
+		t.Log("OK group_to_role: bob gets 'analyst' on central via Finance group membership (no per-user assignment)")
+	})
 }

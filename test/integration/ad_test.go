@@ -18,7 +18,10 @@ func ldapConfig(url, baseDN, domain string) map[string]any {
 	return map[string]any{
 		"url": url, "base_dn": baseDN, "bind_dn": "cn=admin," + baseDN,
 		"bind_password": "adminpw", "username_attr": "uid",
-		"display_name_attr": "cn", "email_attr": "mail", "groups_attr": "memberOf",
+		// The fixture carries group membership in `ou` (see ldap/corp.ldif) to
+		// avoid needing the OpenLDAP memberof overlay; the group->role code path is
+		// identical regardless of the attribute name.
+		"display_name_attr": "cn", "email_attr": "mail", "groups_attr": "ou",
 		"use_tls": false, "allow_insecure": true, "domain": domain,
 	}
 }

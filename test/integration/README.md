@@ -84,6 +84,10 @@ samba schema); AD users are provisioned via the login/JIT path.
 - **mixed_population** — one standalone with an AD user **and** a local break-glass
   account: the AD user migrates policy-only, the local one carries its hash, and
   both authenticate on the central.
+- **group_to_role** — `bob` gets a role on a central app purely via **group
+  membership** (he's in `Finance`), with no per-user assignment. (The fixture
+  carries group membership in `ou` and points `groups_attr` at it, to avoid the
+  OpenLDAP memberof overlay; the group→role code path is identical.)
 
 > Not wired into CI by design — it's a local/manual harness (`make up` to explore,
 > `make test` to assert). Run it when you touch the migration paths.
