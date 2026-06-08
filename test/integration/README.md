@@ -15,16 +15,19 @@ make logs      # follow logs
 
 Requires Docker + Compose + openssl + Go (the driver runs on the host).
 
-## Topology (phase 1)
+## Topology
 
-| Service | Role | Store | TLS |
-|---|---|---|---|
-| `postgres` | central's database | — | — |
-| `central` | the ONE centralized SimpleAuth | Postgres | serves HTTPS (cert SAN=`central`,`localhost`,`127.0.0.1`) |
-| `standalone-local` | a local-accounts deployment that migrates in | BoltDB | plain HTTP internally |
+| Service | Role | Store / dir |
+|---|---|---|
+| `postgres` | central's database | — |
+| `central` | the ONE centralized SimpleAuth (HTTPS, cert SAN=`central`,`localhost`) | Postgres |
+| `standalone-local` | local-accounts deployment → migrates in | BoltDB |
+| `standalone-ad` | **same-AD** deployment → policy-only migration | BoltDB + corp.local |
+| `standalone-addiff` | **different-AD** deployment → blocked at preflight | BoltDB + other.local |
+| `ldap-corp` / `ldap-other` | OpenLDAP directories (`uid`/seed LDIF) | corp.local / other.local |
 
 Published to the host (loopback only): central `https://localhost:9443`,
-standalone `http://localhost:9444`.
+standalone-local `:9444`, standalone-ad `:9445`, standalone-addiff `:9446`.
 
 ### Cross-container TLS
 
@@ -48,10 +51,21 @@ secure path, not a bypass.
    authz;
 6. logs `alice` in **against the central** with her original password (carried
    hash) and asserts the token carries `roles=[admin]`, `perms` incl.
-   `invoice:write`, `aud=billing`.
+   `invoice:write`, and the **carried source audience** (not the target app id —
+   that's what lets the consumer app keep its existing token validation).
 
-## Phase 2 (planned)
+## AD scenarios (`ad_test.go`)
 
-Add `ldap-corp` / `ldap-other` (seeded with `sAMAccountName`/`memberOf` via LDIF)
-and standalones for: **same-AD** (policy-only migration, AD re-bind), **different
-AD** (preflight blocks), and a **direct app** registered straight on the central.
+`TestADMigrationScenarios` drives the AD half of the matrix against the two
+OpenLDAP directories. SimpleAuth is pointed at `username_attr=uid`, so
+`User.SAMAccountName` is populated from `uid` and vanilla OpenLDAP suffices (no
+samba schema); AD users are provisioned via the login/JIT path.
+
+- **same-AD** — `bob` logs into `standalone-ad`, gets a role, and is migrated to
+  the central **policy-only** (no record/password copied, `local_users=0`); he
+  then **re-binds from the same AD on the central** and resolves his migrated
+  role.
+- **different-AD** — `carol` (other.local) is **blocked at preflight** (the
+  central is on corp.local) and commit is refused (409).
+- **direct app** — an app registered straight on the central; `bob` authenticates
+  directly against it (no migration).

@@ -73,5 +73,74 @@ services:
     depends_on:
       - central
 
+  # --- Phase 2: AD scenarios ------------------------------------------------
+  # corp.local — the SHARED directory for the central + the same-AD standalone.
+  ldap-corp:
+    image: osixia/openldap:1.5.0
+    command: ["--copy-service"]
+    environment:
+      LDAP_ORGANISATION: "Corp"
+      LDAP_DOMAIN: "corp.local"
+      LDAP_ADMIN_PASSWORD: "adminpw"
+    volumes:
+      - ./ldap/corp.ldif:/container/service/slapd/assets/config/bootstrap/ldif/custom/01-users.ldif:ro
+
+  # other.local — a DIFFERENT directory; its users are unsatisfiable on the central.
+  ldap-other:
+    image: osixia/openldap:1.5.0
+    command: ["--copy-service"]
+    environment:
+      LDAP_ORGANISATION: "Other"
+      LDAP_DOMAIN: "other.local"
+      LDAP_ADMIN_PASSWORD: "adminpw"
+    volumes:
+      - ./ldap/other.ldif:/container/service/slapd/assets/config/bootstrap/ldif/custom/01-users.ldif:ro
+
+  # An AD-backed standalone on the SAME AD as the central -> policy-only migration.
+  standalone-ad:
+    image: simpleauth:itest
+    environment:
+      AUTH_ADMIN_KEY: ad-admin-key
+      AUTH_HOSTNAME: standalone-ad
+      AUTH_PORT: "8080"
+      AUTH_HTTP_PORT: "8080"
+      AUTH_TLS_DISABLED: "true"
+      AUTH_BASE_PATH: "/"
+      AUTH_JWT_ISSUER: standalone-ad
+      AUTH_DATA_DIR: /data
+      SSL_CERT_FILE: /certs/ca.crt
+    volumes:
+      - standalone-ad-data:/data
+      - ./certs/ca.crt:/certs/ca.crt:ro
+    ports:
+      - "127.0.0.1:9445:8080"
+    depends_on:
+      - central
+      - ldap-corp
+
+  # An AD-backed standalone on a DIFFERENT AD -> preflight must block its users.
+  standalone-addiff:
+    image: simpleauth:itest
+    environment:
+      AUTH_ADMIN_KEY: addiff-admin-key
+      AUTH_HOSTNAME: standalone-addiff
+      AUTH_PORT: "8080"
+      AUTH_HTTP_PORT: "8080"
+      AUTH_TLS_DISABLED: "true"
+      AUTH_BASE_PATH: "/"
+      AUTH_JWT_ISSUER: standalone-addiff
+      AUTH_DATA_DIR: /data
+      SSL_CERT_FILE: /certs/ca.crt
+    volumes:
+      - standalone-addiff-data:/data
+      - ./certs/ca.crt:/certs/ca.crt:ro
+    ports:
+      - "127.0.0.1:9446:8080"
+    depends_on:
+      - central
+      - ldap-other
+
 volumes:
   standalone-local-data:
+  standalone-ad-data:
+  standalone-addiff-data:
