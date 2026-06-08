@@ -1,0 +1,14 @@
+# Seed for the other.local directory (used by `standalone-addiff`, the
+# DIFFERENT-AD scenario — the central is on corp.local, so these users are
+# unsatisfiable there and preflight must block them).
+dn: ou=users,dc=other,dc=local
+objectClass: organizationalUnit
+ou: users
+
+dn: uid=carol,ou=users,dc=other,dc=local
+objectClass: inetOrgPerson
+cn: Carol Other
+sn: Other
+uid: carol
+mail: carol@other.local
+userPassword: carolpass

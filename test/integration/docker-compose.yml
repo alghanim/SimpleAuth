@@ -1,0 +1,146 @@
+# =============================================================================
+# SimpleAuth — integration test topology (SELF-CONTAINED; not the prod compose)
+# =============================================================================
+# Phase 1: a centralized SimpleAuth (Postgres + HTTPS) and a standalone (BoltDB,
+# local accounts) that migrates INTO it over real cross-container TLS.
+#
+#   make up     stand up the environment (browse https://localhost:9443/admin)
+#   make test   up + run the Go scenario driver + tear down
+#   make down    tear down + wipe volumes
+#
+# The standalone pushes to https://central:8080 (the internal name) and validates
+# the central's cert via the internal CA mounted at /certs/ca.crt (SSL_CERT_FILE).
+# =============================================================================
+
+name: simpleauth-itest
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: itest
+      POSTGRES_DB: simpleauth
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d simpleauth"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  # The ONE centralized SimpleAuth: Postgres-backed, serves its own HTTPS.
+  central:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: simpleauth:itest
+    environment:
+      AUTH_ADMIN_KEY: central-admin-key
+      AUTH_HOSTNAME: central
+      AUTH_PORT: "8080"
+      AUTH_BASE_PATH: "/"
+      AUTH_JWT_ISSUER: central
+      AUTH_POSTGRES_URL: "postgres://postgres:itest@postgres:5432/simpleauth?sslmode=disable"
+      AUTH_TLS_CERT: /certs/central.crt
+      AUTH_TLS_KEY: /certs/central.key
+    volumes:
+      - ./certs/central.crt:/certs/central.crt:ro
+      - ./certs/central.key:/certs/central.key:ro
+    ports:
+      - "127.0.0.1:9443:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # A standalone deployment with LOCAL accounts (no AD), BoltDB. Serves plain HTTP
+  # on the internal network; trusts the central's CA for the outbound migration.
+  standalone-local:
+    image: simpleauth:itest
+    environment:
+      AUTH_ADMIN_KEY: local-admin-key
+      AUTH_HOSTNAME: standalone-local
+      AUTH_PORT: "8080"
+      AUTH_HTTP_PORT: "8080"
+      AUTH_TLS_DISABLED: "true"
+      AUTH_BASE_PATH: "/"
+      AUTH_JWT_ISSUER: standalone-local
+      AUTH_DATA_DIR: /data
+      # Trust the central's internal CA so the HTTPS migration push validates.
+      SSL_CERT_FILE: /certs/ca.crt
+    volumes:
+      - standalone-local-data:/data
+      - ./certs/ca.crt:/certs/ca.crt:ro
+    ports:
+      - "127.0.0.1:9444:8080"
+    depends_on:
+      - central
+
+  # --- Phase 2: AD scenarios ------------------------------------------------
+  # corp.local — the SHARED directory for the central + the same-AD standalone.
+  ldap-corp:
+    image: osixia/openldap:1.5.0
+    command: ["--copy-service"]
+    environment:
+      LDAP_ORGANISATION: "Corp"
+      LDAP_DOMAIN: "corp.local"
+      LDAP_ADMIN_PASSWORD: "adminpw"
+    volumes:
+      - ./ldap/corp.ldif:/container/service/slapd/assets/config/bootstrap/ldif/custom/01-users.ldif:ro
+
+  # other.local — a DIFFERENT directory; its users are unsatisfiable on the central.
+  ldap-other:
+    image: osixia/openldap:1.5.0
+    command: ["--copy-service"]
+    environment:
+      LDAP_ORGANISATION: "Other"
+      LDAP_DOMAIN: "other.local"
+      LDAP_ADMIN_PASSWORD: "adminpw"
+    volumes:
+      - ./ldap/other.ldif:/container/service/slapd/assets/config/bootstrap/ldif/custom/01-users.ldif:ro
+
+  # An AD-backed standalone on the SAME AD as the central -> policy-only migration.
+  standalone-ad:
+    image: simpleauth:itest
+    environment:
+      AUTH_ADMIN_KEY: ad-admin-key
+      AUTH_HOSTNAME: standalone-ad
+      AUTH_PORT: "8080"
+      AUTH_HTTP_PORT: "8080"
+      AUTH_TLS_DISABLED: "true"
+      AUTH_BASE_PATH: "/"
+      AUTH_JWT_ISSUER: standalone-ad
+      AUTH_DATA_DIR: /data
+      SSL_CERT_FILE: /certs/ca.crt
+    volumes:
+      - standalone-ad-data:/data
+      - ./certs/ca.crt:/certs/ca.crt:ro
+    ports:
+      - "127.0.0.1:9445:8080"
+    depends_on:
+      - central
+      - ldap-corp
+
+  # An AD-backed standalone on a DIFFERENT AD -> preflight must block its users.
+  standalone-addiff:
+    image: simpleauth:itest
+    environment:
+      AUTH_ADMIN_KEY: addiff-admin-key
+      AUTH_HOSTNAME: standalone-addiff
+      AUTH_PORT: "8080"
+      AUTH_HTTP_PORT: "8080"
+      AUTH_TLS_DISABLED: "true"
+      AUTH_BASE_PATH: "/"
+      AUTH_JWT_ISSUER: standalone-addiff
+      AUTH_DATA_DIR: /data
+      SSL_CERT_FILE: /certs/ca.crt
+    volumes:
+      - standalone-addiff-data:/data
+      - ./certs/ca.crt:/certs/ca.crt:ro
+    ports:
+      - "127.0.0.1:9446:8080"
+    depends_on:
+      - central
+      - ldap-other
+
+volumes:
+  standalone-local-data:
+  standalone-ad-data:
+  standalone-addiff-data:

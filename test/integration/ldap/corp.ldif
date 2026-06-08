@@ -1,0 +1,14 @@
+# Seed for the corp.local directory (shared by `central` and `standalone-ad`,
+# i.e. the SAME-AD scenario). Vanilla OpenLDAP attrs — SimpleAuth is pointed at
+# username_attr=uid, so User.SAMAccountName is populated from `uid`.
+dn: ou=users,dc=corp,dc=local
+objectClass: organizationalUnit
+ou: users
+
+dn: uid=bob,ou=users,dc=corp,dc=local
+objectClass: inetOrgPerson
+cn: Bob Builder
+sn: Builder
+uid: bob
+mail: bob@corp.local
+userPassword: bobpass
