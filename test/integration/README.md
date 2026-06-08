@@ -69,3 +69,25 @@ samba schema); AD users are provisioned via the login/JIT path.
   central is on corp.local) and commit is refused (409).
 - **direct app** — an app registered straight on the central; `bob` authenticates
   directly against it (no migration).
+
+## More scenarios (`scenarios2_test.go`)
+
+`TestMoreScenarios`:
+- **carry_secret round-trip** — the source home app's secret is rotated, migrated
+  with `carry_secret`, and the *same* secret then authenticates the central app
+  (`/api/app/token`) — the consumer keeps its credential after cutover.
+- **central_not_on_ad** — with the central's LDAP removed, an AD standalone's
+  users are blocked at preflight.
+- **migration_guards** — across the container boundary: a reused single-use token
+  is `401`, and a fresh token cannot re-migrate into an already-populated app
+  (fresh-target guard).
+- **mixed_population** — one standalone with an AD user **and** a local break-glass
+  account: the AD user migrates policy-only, the local one carries its hash, and
+  both authenticate on the central.
+- **group_to_role** — `bob` gets a role on a central app purely via **group
+  membership** (he's in `Finance`), with no per-user assignment. (The fixture
+  carries group membership in `ou` and points `groups_attr` at it, to avoid the
+  OpenLDAP memberof overlay; the group→role code path is identical.)
+
+> Not wired into CI by design — it's a local/manual harness (`make up` to explore,
+> `make test` to assert). Run it when you touch the migration paths.
