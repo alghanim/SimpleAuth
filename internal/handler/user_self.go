@@ -1,9 +1,108 @@
 package handler
 
 import (
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
 	"net/http"
+	"sort"
+	"strings"
 	"time"
+
+	"simpleauth/internal/store"
 )
+
+// userAppView renders one app for GET /api/user/apps (SA-1 presentation only —
+// deliberately no roles/permissions/assignment-source: SA-2 is a bounded
+// cross-app disclosure, so the payload is minimized). icon_url is the absolute
+// URL computed from base_url + the relative icon path.
+func userAppView(a *store.App) map[string]interface{} {
+	display := a.DisplayName
+	if len(display) == 0 {
+		display = map[string]string{"en": a.Name}
+	}
+	iconURL := ""
+	if a.Icon != "" {
+		iconURL = a.BaseURL + a.Icon
+	}
+	return map[string]interface{}{
+		"app_id":       a.AppID,
+		"base_url":     a.BaseURL,
+		"display_name": display,
+		"category":     a.Category,
+		"icon_url":     iconURL,
+	}
+}
+
+// handleUserApps returns the apps the CALLER MAY ENTER (SA-2) — the authoritative
+// source for the portal app-switcher and grid. It accepts any user access token
+// of any audience (there is no other way to answer "which apps may this user
+// enter" under audience isolation), and the "may enter" predicate is exactly
+// "would be admitted at token issuance": it reuses resolveTokenRoles' admit/deny
+// verdict, so a require_assignment app that would deny the user is excluded, and
+// a require_assignment=false app (which admits every directory user) is included.
+// Disabled apps, the global directory app, and non-launchable apps (no base_url)
+// are excluded.
+//
+// GET /api/user/apps   Authorization: Bearer <caller's own access token>
+func (h *Handler) handleUserApps(w http.ResponseWriter, r *http.Request) {
+	ip := getClientIP(r)
+	if !h.loginLimiter.allow(ip) {
+		jsonError(w, "too many requests", http.StatusTooManyRequests)
+		return
+	}
+
+	tokenStr := extractBearerToken(r)
+	if tokenStr == "" {
+		jsonError(w, "missing authorization header", http.StatusUnauthorized)
+		return
+	}
+	claims, err := h.validateAccessToken(tokenStr)
+	if err != nil {
+		jsonError(w, "invalid or revoked token", http.StatusUnauthorized)
+		return
+	}
+	// Resolve the user for their last-known groups — the same basis refresh uses,
+	// so "may enter" matches what a fresh token would actually be granted.
+	user, err := h.store.ResolveUser(claims.Subject)
+	if err != nil {
+		jsonError(w, "user not found", http.StatusUnauthorized)
+		return
+	}
+
+	apps, err := h.store.ListApps()
+	if err != nil {
+		jsonError(w, "failed to list apps", http.StatusInternalServerError)
+		return
+	}
+	out := make([]map[string]interface{}, 0, len(apps))
+	for _, a := range apps {
+		// Non-launchable: the global directory app, disabled apps, and apps with no
+		// canonical origin (nothing to render as a launch card).
+		if a.AppID == h.defaultAppID() || a.Disabled || a.BaseURL == "" {
+			continue
+		}
+		if _, _, denied := h.resolveTokenRoles(a, user); denied {
+			continue
+		}
+		out = append(out, userAppView(a))
+	}
+	// Stable order so the ETag is meaningful across backends/requests.
+	sort.Slice(out, func(i, j int) bool {
+		return out[i]["app_id"].(string) < out[j]["app_id"].(string)
+	})
+
+	// A weak ETag lets a shell revalidate cheaply on every cross-module hop
+	// (SA-2 caching) — the list changes rarely relative to how often it is read.
+	body, _ := json.Marshal(out)
+	etag := fmt.Sprintf(`W/"%x"`, sha256.Sum256(body))
+	w.Header().Set("ETag", etag)
+	if strings.Contains(r.Header.Get("If-None-Match"), etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	jsonResp(w, out, http.StatusOK)
+}
 
 // handleUserLogoutAll terminates the CALLER'S OWN presence everywhere (SA-3):
 // revoke their refresh families, blacklist their outstanding access tokens until
