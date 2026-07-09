@@ -323,7 +323,8 @@ base_path: "/sauth"
 # Audit log retention
 audit_retention: "2160h"  # 90 days
 
-# Rate limiting
+# Rate limiting (seed values — after first run the admin decides at runtime
+# via the admin UI: Settings -> Rate Limiting, including disabling it)
 rate_limit_max: 10
 rate_limit_window: "1m"
 

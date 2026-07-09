@@ -355,7 +355,15 @@ Only matters when you're running multiple SimpleAuth instances against the same 
 
 ### `rate_limit_max` / `rate_limit_window`
 
-Controls brute-force protection on the login endpoint. The default of 10 attempts per minute per IP address is appropriate for most environments. Adjust if you have shared NAT IPs.
+Controls brute-force protection on the login-shaped endpoints (login, refresh,
+OIDC, app tokens, migration). The default of 10 attempts per minute per IP
+address is appropriate for most environments. Adjust if you have shared NAT IPs.
+
+These config values only **seed** the first run. After that, the admin decides
+at runtime: the Admin UI (Settings → Rate Limiting) or `PUT /api/admin/settings`
+can change the limit, the window, or disable rate limiting entirely
+(`rate_limit_disabled: true`) — changes apply immediately, no restart needed,
+and are audited as `rate_limit_changed`.
 
 ---
 
@@ -363,7 +371,7 @@ Controls brute-force protection on the login endpoint. The default of 10 attempt
 
 Environment variables and config file values **seed the database on first run only**. After that, the Admin UI (or `PUT /api/admin/settings`) owns these values and they are stored in the database under `runtime_settings`. Changing an env var after first run has no effect on settings that are already stored in the DB.
 
-Settings managed this way include: `deployment_name`, `redirect_uris`, `cors_origins`, password policy, account lockout, and `default_roles`.
+Settings managed this way include: `deployment_name`, `redirect_uris`, `cors_origins`, password policy, account lockout, `default_roles`, and rate limiting (`rate_limit_max`, `rate_limit_window_s`, `rate_limit_disabled`).
 
 To reset a runtime setting to its env-var value, delete the `runtime_settings` key from the database (or delete the database and let SimpleAuth re-seed).
 

@@ -2101,29 +2101,28 @@ curl -k -H "Authorization: Bearer ADMIN_KEY" \
 
 ```json
 {
-  "redirect_uris": ["https://myapp.example.com/callback"],
-  "cors_origins": ["https://myapp.example.com"],
-  "password_policy": {
-    "min_length": 8,
-    "require_uppercase": true,
-    "require_lowercase": true,
-    "require_digit": true,
-    "require_special": false,
-    "history_count": 5
-  },
-  "lockout": {
-    "max_attempts": 5,
-    "duration_minutes": 15
-  },
-  "rate_limiting": {
-    "enabled": true,
-    "requests_per_second": 10
-  },
-  "default_roles": ["user"],
-  "audit_retention_days": 90,
   "deployment_name": "sauth",
+  "redirect_uris": ["https://myapp.example.com/callback"],
+  "cors_origins": "https://myapp.example.com",
+  "password_min_length": 8,
+  "password_require_uppercase": true,
+  "password_require_lowercase": true,
+  "password_require_digit": true,
+  "password_require_special": false,
+  "password_history_count": 5,
+  "account_lockout_threshold": 5,
+  "account_lockout_duration_s": 900,
+  "default_roles": ["user"],
+  "rate_limit_max": 10,
+  "rate_limit_window_s": 60,
+  "rate_limit_disabled": false,
+  "audit_retention_days": 90,
   "auto_sso": false,
-  "auto_sso_delay": 3
+  "auto_sso_delay": 3,
+  "enable_session_sso": false,
+  "session_sso_idle_hours": 8,
+  "session_sso_max_hours": 720,
+  "version": 4
 }
 ```
 
@@ -2139,45 +2138,65 @@ curl -k -H "Authorization: Bearer ADMIN_KEY" \
 
 **Auth:** Admin Key
 
-Update runtime settings. Only provided fields are updated.
+Replace the runtime settings. This is a **full-document replace**, not a merge:
+do a `GET`, modify the fields you care about, and `PUT` the whole document back
+(the Admin UI does exactly this). Omitted fields are taken as zero values —
+security-relevant zeroes are clamped server-side rather than trusted:
+
+- `password_min_length` is floored at 8.
+- `cors_origins` of `"*"` is rejected (400).
+- `rate_limit_max` / `rate_limit_window_s` that are omitted, zero, or out of
+  bounds fall back to the deployment config (then to 10/60) and are capped at
+  1000000000 / 86400. The response echoes the values actually applied.
+- Rate limiting is only ever turned off by the explicit boolean
+  `rate_limit_disabled: true` — an omitted field leaves the limiter ON.
+
+Rate-limit changes (including the toggle) take effect **immediately** on the
+live limiter; no restart is needed. Toggle/limit/window changes are audited as
+`rate_limit_changed` with old and new values.
+
+**Concurrency:** the document carries a `version` token. If the `PUT` echoes a
+`version` (the Admin UI always does) that no longer matches the server's, the
+request is rejected with **409** — reload and retry. A `PUT` without `version`
+(or `version: 0`) keeps legacy last-writer-wins behavior.
 
 ```bash
 curl -k -X PUT https://auth.example.com/sauth/api/admin/settings \
   -H "Authorization: Bearer ADMIN_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "redirect_uris": ["https://myapp.example.com/callback", "https://other.example.com/callback"],
-    "cors_origins": ["https://myapp.example.com"],
-    "password_policy": {
-      "min_length": 12,
-      "require_uppercase": true,
-      "require_lowercase": true,
-      "require_digit": true,
-      "require_special": true,
-      "history_count": 10
-    },
-    "lockout": {
-      "max_attempts": 3,
-      "duration_minutes": 30
-    },
-    "rate_limiting": {
-      "enabled": true,
-      "requests_per_second": 5
-    },
-    "default_roles": ["user", "viewer"],
-    "audit_retention_days": 180,
     "deployment_name": "prod-auth",
-    "auto_sso": true,
-    "auto_sso_delay": 5
+    "redirect_uris": ["https://myapp.example.com/callback"],
+    "password_min_length": 12,
+    "password_require_uppercase": true,
+    "password_require_lowercase": true,
+    "password_require_digit": true,
+    "password_require_special": true,
+    "password_history_count": 10,
+    "account_lockout_threshold": 3,
+    "account_lockout_duration_s": 1800,
+    "default_roles": ["user", "viewer"],
+    "rate_limit_max": 5,
+    "rate_limit_window_s": 60,
+    "rate_limit_disabled": false,
+    "audit_retention_days": 180,
+    "version": 4
   }'
 ```
 
-**Response (200):** Returns the full updated `RuntimeSettings` JSON (same shape as `GET`).
+**Response (200):** Returns the full updated `RuntimeSettings` JSON (same shape
+as `GET`, with `version` bumped).
 
 **Error response (401):**
 
 ```json
 {"error": "unauthorized"}
+```
+
+**Error response (409):**
+
+```json
+{"error": "settings changed since they were loaded — reload and retry"}
 ```
 
 ---
