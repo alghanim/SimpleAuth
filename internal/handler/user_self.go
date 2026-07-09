@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"sort"
 	"strings"
-	"time"
 
 	"simpleauth/internal/store"
 )
@@ -69,6 +68,12 @@ func (h *Handler) handleUserApps(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "user not found", http.StatusUnauthorized)
 		return
 	}
+	// Fail closed on a disabled account, matching the login/refresh gates — a
+	// just-disabled user with a still-live token must not keep enumerating apps.
+	if user.Disabled {
+		jsonError(w, "account disabled", http.StatusUnauthorized)
+		return
+	}
 
 	apps, err := h.store.ListApps()
 	if err != nil {
@@ -80,6 +85,13 @@ func (h *Handler) handleUserApps(w http.ResponseWriter, r *http.Request) {
 		// Non-launchable: the global directory app, disabled apps, and apps with no
 		// canonical origin (nothing to render as a launch card).
 		if a.AppID == h.defaultAppID() || a.Disabled || a.BaseURL == "" {
+			continue
+		}
+		// Authentication eligibility, not just per-app authz: an app-local user can
+		// only ever authenticate into their OWN owner app, so never show them the
+		// catalog of other (e.g. require_assignment=false) apps they could never
+		// enter. Directory users (OwnerAppID == "") are unconstrained here.
+		if user.OwnerAppID != "" && a.AppID != user.OwnerAppID {
 			continue
 		}
 		if _, _, denied := h.resolveTokenRoles(a, user); denied {
@@ -105,18 +117,22 @@ func (h *Handler) handleUserApps(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleUserLogoutAll terminates the CALLER'S OWN presence everywhere (SA-3):
-// revoke their refresh families, blacklist their outstanding access tokens until
-// those tokens expire, and delete their shared __sa_sso sessions. Authenticated
-// by the user's own access token of any audience — the target is always the
-// token's subject, so a user can only ever log themselves out.
+// revoke their refresh families and delete their shared __sa_sso sessions, so no
+// module can silently re-mint after logout and the shared session is gone.
+// Authenticated by the user's own access token of any audience — the target is
+// always the token's subject, so a user can only ever log themselves out.
 //
-// This exposes, user-scoped, the exact composite the master-gated
-// handleRevokeSessions performs. It is the user-invokable trigger for the
-// existing revocation machinery — the access-token blacklist it sets is already
-// consulted on both refresh paths (auth.go / oidc.go IsUserAccessRevoked), so a
-// refresh cannot silently re-mint after logout. Under offline JWKS verification a
-// live access token stays valid until its exp; the residual window is therefore
-// bounded by the access-token TTL, which is why the blacklist is set to now+TTL.
+// It deliberately does NOT set the per-user access blacklist that the
+// master-gated handleRevokeSessions uses. That blacklist is a BLANKET
+// per-user flag (IsUserAccessRevoked ignores token iat), so it would also reject
+// the user's next fresh login for the whole window — a self-lockout that is
+// correct for an admin kill switch but wrong for a user logging themselves out
+// and back in. Under offline-JWKS verification a live access token is valid
+// until its exp regardless, so refresh-revocation + SSO teardown is the
+// meaningful lever; residual access is bounded by each outstanding token's own
+// remaining life. (A token-iat revocation watermark — which would kill
+// outstanding tokens while still allowing an immediate re-login — is the right
+// system-wide enhancement to the revocation model, out of scope here.)
 //
 // POST /api/user/logout-all   Authorization: Bearer <caller's own access token>
 func (h *Handler) handleUserLogoutAll(w http.ResponseWriter, r *http.Request) {
@@ -144,7 +160,6 @@ func (h *Handler) handleUserLogoutAll(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "failed to revoke sessions", http.StatusInternalServerError)
 		return
 	}
-	h.store.RevokeAllUserAccessTokens(guid, time.Now().Add(h.cfg.AccessTTL))
 	h.store.DeleteUserSessions(guid)
 
 	var auditData map[string]interface{}

@@ -106,3 +106,62 @@ func TestSA2_UserApps(t *testing.T) {
 		t.Fatalf("refresh token as bearer must be 401, got %d", w.Code)
 	}
 }
+
+// TestSA2_AppLocalUserSeesOnlyOwnApp covers the eligibility gate: an app-local
+// user can only ever authenticate into their owner app, so GET /api/user/apps
+// must not show them other (even open) apps they could never enter.
+func TestSA2_AppLocalUserSeesOnlyOwnApp(t *testing.T) {
+	h, _ := testSetup(t)
+	adm := adminHeaders()
+
+	// owner app (allows local users) + an unrelated open app
+	w := doJSON(h, "POST", "/api/admin/apps", map[string]interface{}{
+		"app_id": "shop", "audience": "shop", "allow_local_users": true, "base_url": "https://shop.example.com",
+	}, adm)
+	var app map[string]interface{}
+	parseJSON(t, w, &app)
+	secret := app["app_secret"].(string)
+	mkAppWithURL(t, h, adm, "open-app", false) // require_assignment=false, launchable
+
+	// an app-local user of "shop"
+	doJSON(h, "POST", "/api/app/users", map[string]interface{}{"username": "shopper", "password": "shoppass1"}, basicAuth("shop", secret))
+	w = doJSON(h, "POST", "/api/auth/login", map[string]interface{}{"username": "shopper", "password": "shoppass1", "app_id": "shop"}, nil)
+	var tok map[string]interface{}
+	parseJSON(t, w, &tok)
+
+	w = doJSON(h, "GET", "/api/user/apps", nil, map[string]string{"Authorization": "Bearer " + tok["access_token"].(string)})
+	var apps []map[string]interface{}
+	parseJSON(t, w, &apps)
+	if len(apps) != 1 || apps[0]["app_id"] != "shop" {
+		ids := []string{}
+		for _, a := range apps {
+			ids = append(ids, a["app_id"].(string))
+		}
+		t.Fatalf("app-local user must see only their owner app, got %v", ids)
+	}
+}
+
+// TestSA2_DisabledUserRejected covers the fail-closed gate: a disabled user with
+// a still-live token cannot enumerate apps.
+func TestSA2_DisabledUserRejected(t *testing.T) {
+	h, s := testSetup(t)
+	adm := adminHeaders()
+	w := doJSON(h, "POST", "/api/admin/users", map[string]interface{}{"display_name": "Dan", "password": "pass1234"}, adm)
+	var user map[string]interface{}
+	parseJSON(t, w, &user)
+	guid := user["guid"].(string)
+	s.SetIdentityMapping("local", "dan", guid)
+	w = doJSON(h, "POST", "/api/auth/login", map[string]interface{}{"username": "dan", "password": "pass1234"}, nil)
+	var tok map[string]interface{}
+	parseJSON(t, w, &tok)
+
+	// disable the user directly, then try to enumerate with the still-live token
+	u, _ := s.GetUser(guid)
+	u.Disabled = true
+	if err := s.UpdateUser(u); err != nil {
+		t.Fatalf("disable user: %v", err)
+	}
+	if w := doJSON(h, "GET", "/api/user/apps", nil, map[string]string{"Authorization": "Bearer " + tok["access_token"].(string)}); w.Code != http.StatusUnauthorized {
+		t.Fatalf("disabled user must be 401 at /api/user/apps, got %d", w.Code)
+	}
+}

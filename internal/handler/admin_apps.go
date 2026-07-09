@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"net/http"
-	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -35,54 +34,6 @@ func slugifyAppID(name string) string {
 		s = s[:64]
 	}
 	return s
-}
-
-// normalizeBaseURL validates a module's canonical origin (SA-1) and returns it
-// normalized. It is stored and returned but NEVER dereferenced by SimpleAuth, so
-// validation is purely syntactic: an absolute https URL with a host, an optional
-// path prefix, and no userinfo/query/fragment; the trailing slash is stripped.
-// Empty is allowed (a non-launchable app). This is deliberately strict so a
-// stored base_url can be trusted as a launch target without runtime checks.
-func normalizeBaseURL(raw string) (string, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return "", nil
-	}
-	u, err := url.Parse(raw)
-	if err != nil {
-		return "", errors.New("base_url is not a valid URL")
-	}
-	if u.Scheme != "https" {
-		return "", errors.New("base_url must be an absolute https:// URL")
-	}
-	if u.Host == "" {
-		return "", errors.New("base_url must include a host")
-	}
-	if u.User != nil {
-		return "", errors.New("base_url must not contain userinfo")
-	}
-	if u.RawQuery != "" || u.Fragment != "" {
-		return "", errors.New("base_url must not contain a query or fragment")
-	}
-	path := strings.TrimRight(u.Path, "/")
-	return u.Scheme + "://" + u.Host + path, nil
-}
-
-// validateIconPath ensures the icon is a relative path under base_url, never an
-// absolute/remote URL or a traversal — SA-1 forbids inline bytes and off-origin
-// icons. Empty is allowed.
-func validateIconPath(raw string) error {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return nil
-	}
-	if strings.Contains(raw, "://") || strings.HasPrefix(raw, "//") {
-		return errors.New("icon must be a relative path under base_url, not an absolute URL")
-	}
-	if strings.Contains(raw, "..") {
-		return errors.New("icon path must not contain '..'")
-	}
-	return nil
 }
 
 // appView renders an app for API responses — never includes the secret hash.
@@ -126,12 +77,12 @@ func (h *Handler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	baseURL, err := normalizeBaseURL(req.BaseURL)
+	baseURL, err := store.NormalizeBaseURL(req.BaseURL)
 	if err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := validateIconPath(req.Icon); err != nil {
+	if err := store.ValidateIconPath(req.Icon); err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -276,7 +227,7 @@ func (h *Handler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		a.Disabled = *req.Disabled
 	}
 	if req.BaseURL != nil {
-		normalized, err := normalizeBaseURL(*req.BaseURL)
+		normalized, err := store.NormalizeBaseURL(*req.BaseURL)
 		if err != nil {
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
@@ -290,7 +241,7 @@ func (h *Handler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		a.Category = strings.TrimSpace(*req.Category)
 	}
 	if req.Icon != nil {
-		if err := validateIconPath(*req.Icon); err != nil {
+		if err := store.ValidateIconPath(*req.Icon); err != nil {
 			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
 		}

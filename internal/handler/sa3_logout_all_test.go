@@ -41,13 +41,22 @@ func TestSA3_UserLogoutAll(t *testing.T) {
 		t.Fatalf("logout-all: %d %s", w.Code, w.Body.String())
 	}
 
-	// The refresh token no longer mints (family revoked): no silent re-mint.
+	// The refresh token no longer mints (family revoked): no silent re-mint —
+	// this is the meaningful lever under offline-JWKS verification.
 	if w := doJSON(h, "POST", "/api/auth/refresh", map[string]interface{}{"refresh_token": refresh}, nil); w.Code != http.StatusUnauthorized {
 		t.Fatalf("refresh after logout-all must be 401, got %d %s", w.Code, w.Body.String())
 	}
-	// The access token is blacklisted until it expires (IsUserAccessRevoked).
-	if w := doJSON(h, "GET", "/api/auth/userinfo", nil, bearer); w.Code != http.StatusUnauthorized {
-		t.Fatalf("access token after logout-all must be rejected, got %d", w.Code)
+	// Re-login works immediately — logout-all must NOT self-lock the user out of a
+	// fresh session (the blanket per-user blacklist would have; we don't use it).
+	w = doJSON(h, "POST", "/api/auth/login", map[string]interface{}{"username": "alice", "password": "pass1234"}, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("re-login after logout-all: %d %s", w.Code, w.Body.String())
+	}
+	var tok2 map[string]interface{}
+	parseJSON(t, w, &tok2)
+	fresh := map[string]string{"Authorization": "Bearer " + tok2["access_token"].(string)}
+	if w := doJSON(h, "GET", "/api/auth/userinfo", nil, fresh); w.Code != http.StatusOK {
+		t.Fatalf("a fresh login after logout-all must work (no self-lockout), got %d", w.Code)
 	}
 }
 
