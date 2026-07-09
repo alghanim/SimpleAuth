@@ -105,6 +105,26 @@ type App struct {
 	// SecretRotatedAt is set when the app secret is rotated; app-management tokens
 	// issued before this instant are rejected so rotation revokes them (L4).
 	SecretRotatedAt time.Time `json:"secret_rotated_at,omitempty"`
+
+	// --- Presentation metadata (SA-1: the portal app-switcher / grid) ---
+	// These are pure static data — never consulted by any token flow. SimpleAuth
+	// stores and returns them but NEVER dereferences BaseURL (no manifest fetch,
+	// no health check): it is a privileged host and must not be an SSRF vector.
+	//
+	// BaseURL is the module's canonical origin (absolute https, optional path
+	// prefix, normalized without a trailing slash). Empty = a non-launchable app,
+	// excluded from GET /api/user/apps.
+	BaseURL string `json:"base_url,omitempty"`
+	// DisplayName is a locale→name map (e.g. {"en":"Billing","ar":"..."}); "en"
+	// is the expected default. Falls back to Name when a locale is absent.
+	DisplayName map[string]string `json:"display_name,omitempty"`
+	// Category is an opaque grouping string for the portal (taxonomy enforced by
+	// the portal, not here).
+	Category string `json:"category,omitempty"`
+	// Icon is a RELATIVE path resolved under BaseURL (never inline bytes — the App
+	// is deserialized on every login/refresh/authorize, and serving bytes from the
+	// IdP origin is a stored-XSS surface). SA-2 returns the computed absolute URL.
+	Icon string `json:"icon,omitempty"`
 }
 
 type IdentityMapping struct {

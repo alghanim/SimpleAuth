@@ -61,11 +61,15 @@ type ADInfo struct {
 
 // AppConfig is the source home app's config, carried onto the target app.
 type AppConfig struct {
-	Audience          string   `json:"audience,omitempty"`
-	RedirectURIs      []string `json:"redirect_uris,omitempty"`
-	CORSOrigins       []string `json:"cors_origins,omitempty"`
-	SecretHash        string   `json:"secret_hash,omitempty"`
-	RequireAssignment bool     `json:"require_assignment"`
+	Audience          string            `json:"audience,omitempty"`
+	RedirectURIs      []string          `json:"redirect_uris,omitempty"`
+	CORSOrigins       []string          `json:"cors_origins,omitempty"`
+	SecretHash        string            `json:"secret_hash,omitempty"`
+	RequireAssignment bool              `json:"require_assignment"`
+	BaseURL           string            `json:"base_url,omitempty"`
+	DisplayName       map[string]string `json:"display_name,omitempty"`
+	Category          string            `json:"category,omitempty"`
+	Icon              string            `json:"icon,omitempty"`
 }
 
 // Catalog is the source's role/permission definitions.
@@ -111,6 +115,10 @@ func Package(s store.Store, homeAppID, sourceVersion string) (*Bundle, error) {
 			CORSOrigins:       app.CORSOrigins,
 			SecretHash:        app.SecretHash,
 			RequireAssignment: app.RequireAssignment,
+			BaseURL:           app.BaseURL,
+			DisplayName:       app.DisplayName,
+			Category:          app.Category,
+			Icon:              app.Icon,
 		}
 	}
 
@@ -303,6 +311,20 @@ func Apply(b *Bundle, central store.Store, targetAppID string, carrySecret bool)
 	}
 	if len(b.App.CORSOrigins) > 0 {
 		app.CORSOrigins = b.App.CORSOrigins
+	}
+	// Carry the SA-1 presentation metadata onto the target (additive; never blanks
+	// an existing value the operator set on the target).
+	if b.App.BaseURL != "" {
+		app.BaseURL = b.App.BaseURL
+	}
+	if len(b.App.DisplayName) > 0 {
+		app.DisplayName = b.App.DisplayName
+	}
+	if b.App.Category != "" {
+		app.Category = b.App.Category
+	}
+	if b.App.Icon != "" {
+		app.Icon = b.App.Icon
 	}
 	// Never WEAKEN the target's access gate via a migration: OR-in only. A target
 	// the operator deliberately created with require_assignment=true must not be

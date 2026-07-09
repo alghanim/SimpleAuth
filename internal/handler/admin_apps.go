@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -36,6 +37,54 @@ func slugifyAppID(name string) string {
 	return s
 }
 
+// normalizeBaseURL validates a module's canonical origin (SA-1) and returns it
+// normalized. It is stored and returned but NEVER dereferenced by SimpleAuth, so
+// validation is purely syntactic: an absolute https URL with a host, an optional
+// path prefix, and no userinfo/query/fragment; the trailing slash is stripped.
+// Empty is allowed (a non-launchable app). This is deliberately strict so a
+// stored base_url can be trusted as a launch target without runtime checks.
+func normalizeBaseURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", errors.New("base_url is not a valid URL")
+	}
+	if u.Scheme != "https" {
+		return "", errors.New("base_url must be an absolute https:// URL")
+	}
+	if u.Host == "" {
+		return "", errors.New("base_url must include a host")
+	}
+	if u.User != nil {
+		return "", errors.New("base_url must not contain userinfo")
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return "", errors.New("base_url must not contain a query or fragment")
+	}
+	path := strings.TrimRight(u.Path, "/")
+	return u.Scheme + "://" + u.Host + path, nil
+}
+
+// validateIconPath ensures the icon is a relative path under base_url, never an
+// absolute/remote URL or a traversal — SA-1 forbids inline bytes and off-origin
+// icons. Empty is allowed.
+func validateIconPath(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	if strings.Contains(raw, "://") || strings.HasPrefix(raw, "//") {
+		return errors.New("icon must be a relative path under base_url, not an absolute URL")
+	}
+	if strings.Contains(raw, "..") {
+		return errors.New("icon path must not contain '..'")
+	}
+	return nil
+}
+
 // appView renders an app for API responses — never includes the secret hash.
 func appView(a *store.App) map[string]interface{} {
 	return map[string]interface{}{
@@ -48,6 +97,10 @@ func appView(a *store.App) map[string]interface{} {
 		"allow_local_users":  a.AllowLocalUsers,
 		"disabled":           a.Disabled,
 		"created_at":         a.CreatedAt,
+		"base_url":           a.BaseURL,
+		"display_name":       a.DisplayName,
+		"category":           a.Category,
+		"icon":               a.Icon,
 	}
 }
 
@@ -56,16 +109,30 @@ func appView(a *store.App) map[string]interface{} {
 // POST /api/admin/apps
 func (h *Handler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		AppID             string   `json:"app_id"`
-		Name              string   `json:"name"`
-		Audience          string   `json:"audience"`
-		RedirectURIs      []string `json:"redirect_uris"`
-		CORSOrigins       []string `json:"cors_origins"`
-		RequireAssignment bool     `json:"require_assignment"`
-		AllowLocalUsers   bool     `json:"allow_local_users"`
+		AppID             string            `json:"app_id"`
+		Name              string            `json:"name"`
+		Audience          string            `json:"audience"`
+		RedirectURIs      []string          `json:"redirect_uris"`
+		CORSOrigins       []string          `json:"cors_origins"`
+		RequireAssignment bool              `json:"require_assignment"`
+		AllowLocalUsers   bool              `json:"allow_local_users"`
+		BaseURL           string            `json:"base_url"`
+		DisplayName       map[string]string `json:"display_name"`
+		Category          string            `json:"category"`
+		Icon              string            `json:"icon"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	baseURL, err := normalizeBaseURL(req.BaseURL)
+	if err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := validateIconPath(req.Icon); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -109,6 +176,10 @@ func (h *Handler) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		CORSOrigins:       req.CORSOrigins,
 		RequireAssignment: req.RequireAssignment,
 		AllowLocalUsers:   req.AllowLocalUsers,
+		BaseURL:           baseURL,
+		DisplayName:       req.DisplayName,
+		Category:          strings.TrimSpace(req.Category),
+		Icon:              strings.TrimSpace(req.Icon),
 		CreatedAt:         time.Now().UTC(),
 	}
 	if err := h.store.CreateApp(a); err != nil {
@@ -159,18 +230,23 @@ func (h *Handler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Name              *string   `json:"name"`
-		Audience          *string   `json:"audience"`
-		RedirectURIs      *[]string `json:"redirect_uris"`
-		CORSOrigins       *[]string `json:"cors_origins"`
-		RequireAssignment *bool     `json:"require_assignment"`
-		AllowLocalUsers   *bool     `json:"allow_local_users"`
-		Disabled          *bool     `json:"disabled"`
+		Name              *string            `json:"name"`
+		Audience          *string            `json:"audience"`
+		RedirectURIs      *[]string          `json:"redirect_uris"`
+		CORSOrigins       *[]string          `json:"cors_origins"`
+		RequireAssignment *bool              `json:"require_assignment"`
+		AllowLocalUsers   *bool              `json:"allow_local_users"`
+		Disabled          *bool              `json:"disabled"`
+		BaseURL           *string            `json:"base_url"`
+		DisplayName       *map[string]string `json:"display_name"`
+		Category          *string            `json:"category"`
+		Icon              *string            `json:"icon"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
+	oldBaseURL := a.BaseURL
 	if req.Name != nil {
 		a.Name = *req.Name
 	}
@@ -199,11 +275,39 @@ func (h *Handler) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 	if req.Disabled != nil {
 		a.Disabled = *req.Disabled
 	}
+	if req.BaseURL != nil {
+		normalized, err := normalizeBaseURL(*req.BaseURL)
+		if err != nil {
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		a.BaseURL = normalized
+	}
+	if req.DisplayName != nil {
+		a.DisplayName = *req.DisplayName
+	}
+	if req.Category != nil {
+		a.Category = strings.TrimSpace(*req.Category)
+	}
+	if req.Icon != nil {
+		if err := validateIconPath(*req.Icon); err != nil {
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		a.Icon = strings.TrimSpace(*req.Icon)
+	}
 	if err := h.store.UpdateApp(a); err != nil {
 		jsonError(w, "failed to update app", http.StatusInternalServerError)
 		return
 	}
-	h.audit("app_updated", "admin", getClientIP(r), map[string]interface{}{"app_id": a.AppID})
+	// base_url is a user-facing launch target — whoever changes it repoints every
+	// portal-card click, so record old→new for audit (SA-1).
+	auditData := map[string]interface{}{"app_id": a.AppID}
+	if a.BaseURL != oldBaseURL {
+		auditData["old_base_url"] = oldBaseURL
+		auditData["new_base_url"] = a.BaseURL
+	}
+	h.audit("app_updated", "admin", getClientIP(r), auditData)
 	jsonResp(w, appView(a), http.StatusOK)
 }
 
