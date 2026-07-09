@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -169,6 +170,122 @@ func (h *Handler) handleUserLogoutAll(w http.ResponseWriter, r *http.Request) {
 	h.audit("user_logout_all", guid, ip, auditData)
 
 	jsonResp(w, map[string]string{
-		"status": "logged out everywhere (access + refresh tokens + SSO sessions)",
+		"status": "logged out everywhere (refresh tokens + SSO sessions revoked)",
 	}, http.StatusOK)
+}
+
+// --- SA-4: per-user UI preferences ---
+
+// UserPreferences is a FIXED, server-validated per-user UI preference document —
+// deliberately NOT a generic key/value store. Any-audience user tokens can write
+// it, so one module's XSS must not be able to plant arbitrary values that every
+// module shell renders before first paint: unknown keys are rejected and every
+// value is enum/format-checked.
+type UserPreferences struct {
+	Theme         string `json:"theme"`          // light | dark | system
+	Lang          string `json:"lang"`           // BCP-47 tag (e.g. en, ar, en-US)
+	Dir           string `json:"dir"`            // ltr | rtl
+	RailCollapsed bool   `json:"rail_collapsed"` // side-rail collapsed
+}
+
+const (
+	userPrefsKeyPrefix = "user_prefs:"
+	maxUserPrefsBytes  = 2 << 10 // 2 KiB cap on the request body
+)
+
+var (
+	prefThemes = map[string]bool{"light": true, "dark": true, "system": true}
+	prefDirs   = map[string]bool{"ltr": true, "rtl": true}
+	bcp47Re    = regexp.MustCompile(`^[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*$`)
+)
+
+func defaultUserPreferences() UserPreferences {
+	return UserPreferences{Theme: "system", Lang: "en", Dir: "ltr"}
+}
+
+// normalize fills empty fields with defaults and validates the rest, returning a
+// client-facing error for any invalid value.
+func (p *UserPreferences) normalize() error {
+	switch {
+	case p.Theme == "":
+		p.Theme = "system"
+	case !prefThemes[p.Theme]:
+		return fmt.Errorf("theme must be one of: light, dark, system")
+	}
+	switch {
+	case p.Dir == "":
+		p.Dir = "ltr"
+	case !prefDirs[p.Dir]:
+		return fmt.Errorf("dir must be ltr or rtl")
+	}
+	switch {
+	case p.Lang == "":
+		p.Lang = "en"
+	case !bcp47Re.MatchString(p.Lang):
+		return fmt.Errorf("lang must be a BCP-47 language tag")
+	}
+	return nil
+}
+
+// handleGetUserPreferences returns the caller's UI preferences (SA-4), defaults
+// if never set. Authenticated by the user's own access token of any audience.
+// A cheap single-key read, so — like userinfo — it is not rate-limited.
+// GET /api/user/preferences
+func (h *Handler) handleGetUserPreferences(w http.ResponseWriter, r *http.Request) {
+	tokenStr := extractBearerToken(r)
+	if tokenStr == "" {
+		jsonError(w, "missing authorization header", http.StatusUnauthorized)
+		return
+	}
+	claims, err := h.validateAccessToken(tokenStr)
+	if err != nil {
+		jsonError(w, "invalid or revoked token", http.StatusUnauthorized)
+		return
+	}
+	prefs := defaultUserPreferences()
+	if data, _ := h.store.GetConfigValue(userPrefsKeyPrefix + claims.Subject); len(data) > 0 {
+		_ = json.Unmarshal(data, &prefs)
+	}
+	jsonResp(w, prefs, http.StatusOK)
+}
+
+// handleSetUserPreferences replaces the caller's UI preferences (SA-4,
+// full-document, last-write-wins). Strict: unknown keys and out-of-range values
+// are 400; the body is capped. Behind the rate limiter (it is a write).
+// PUT /api/user/preferences
+func (h *Handler) handleSetUserPreferences(w http.ResponseWriter, r *http.Request) {
+	ip := getClientIP(r)
+	if !h.loginLimiter.allow(ip) {
+		jsonError(w, "too many requests", http.StatusTooManyRequests)
+		return
+	}
+	tokenStr := extractBearerToken(r)
+	if tokenStr == "" {
+		jsonError(w, "missing authorization header", http.StatusUnauthorized)
+		return
+	}
+	claims, err := h.validateAccessToken(tokenStr)
+	if err != nil {
+		jsonError(w, "invalid or revoked token", http.StatusUnauthorized)
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxUserPrefsBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var prefs UserPreferences
+	if err := dec.Decode(&prefs); err != nil {
+		jsonError(w, "invalid preferences body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := prefs.normalize(); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	data, _ := json.Marshal(prefs)
+	if err := h.store.SetConfigValue(userPrefsKeyPrefix+claims.Subject, data); err != nil {
+		jsonError(w, "failed to save preferences", http.StatusInternalServerError)
+		return
+	}
+	jsonResp(w, prefs, http.StatusOK)
 }

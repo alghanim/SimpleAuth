@@ -203,6 +203,9 @@ func (h *Handler) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	if err := h.store.DeleteUserSessions(guid); err != nil {
 		log.Printf("[admin] delete-user: clear SSO sessions failed guid=%s err=%v", guid, err)
 	}
+	if err := h.store.DeleteConfigValue(userPrefsKeyPrefix + guid); err != nil {
+		log.Printf("[admin] delete-user: clear UI preferences failed guid=%s err=%v", guid, err)
+	}
 	h.audit("user_deleted", "admin", ip, map[string]interface{}{"target_guid": guid})
 	jsonResp(w, map[string]string{"status": "deleted"}, http.StatusOK)
 }
