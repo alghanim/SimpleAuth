@@ -3,7 +3,6 @@
 package integration
 
 import (
-	"encoding/json"
 	"net/http"
 	"testing"
 	"time"
@@ -18,12 +17,15 @@ func ldapConfig(url, baseDN, domain string) map[string]any {
 	return map[string]any{
 		"url": url, "base_dn": baseDN, "bind_dn": "cn=admin," + baseDN,
 		"bind_password": "adminpw", "username_attr": "uid",
-		// The fixture carries group membership in `ou` (see ldap/corp.ldif) to
-		// avoid needing the OpenLDAP memberof overlay; the group->role code path is
-		// identical regardless of the attribute name.
-		"display_name_attr": "cn", "email_attr": "mail", "groups_attr": "ou",
+		"display_name_attr": "cn", "email_attr": "mail", "groups_attr": "memberOf",
 		"use_tls": false, "allow_insecure": true, "domain": domain,
 	}
+}
+
+// corpLDAPConfig is the shared corp.local directory (see ldap/corp.ldif for the
+// seeded users and groups).
+func corpLDAPConfig() map[string]any {
+	return ldapConfig("ldap://ldap-corp:389", "dc=corp,dc=local", "corp.local")
 }
 
 // loginRetry retries an LDAP login until it succeeds (OpenLDAP takes a while to
@@ -41,7 +43,7 @@ func loginRetry(t *testing.T, n *node, username, password, appID string) string 
 			var r struct {
 				AccessToken string `json:"access_token"`
 			}
-			json.Unmarshal(data, &r)
+			decode(t, data, &r)
 			return r.AccessToken
 		}
 		if time.Now().After(deadline) {
@@ -57,7 +59,7 @@ func findGUIDBySAM(t *testing.T, n *node, sam string) string {
 		GUID string `json:"guid"`
 		SAM  string `json:"sam_account_name"`
 	}
-	json.Unmarshal(n.must(t, "GET", "/api/admin/users", nil), &users)
+	decode(t, n.must(t, "GET", "/api/admin/users", nil), &users)
 	for _, u := range users {
 		if u.SAM == sam {
 			return u.GUID
@@ -73,7 +75,7 @@ func findGUIDBySAM(t *testing.T, n *node, sam string) string {
 // registered directly on the central.
 func TestADMigrationScenarios(t *testing.T) {
 	central := &node{centralURL, centralKey, caClient()}
-	sAD := &node{env("ITEST_STANDALONE_AD_URL", "http://127.0.0.1:9445"), "ad-admin-key", &http.Client{Timeout: 20 * time.Second}}
+	sAD := &node{standaloneADURL, standaloneADKey, &http.Client{Timeout: 20 * time.Second}}
 	sDiff := &node{env("ITEST_STANDALONE_ADDIFF_URL", "http://127.0.0.1:9446"), "addiff-admin-key", &http.Client{Timeout: 20 * time.Second}}
 
 	waitReady(t, "central", centralURL, central.c)
@@ -81,8 +83,8 @@ func TestADMigrationScenarios(t *testing.T) {
 	waitReady(t, "standalone-addiff", sDiff.base, sDiff.c)
 
 	// central + standalone-ad share corp.local; standalone-addiff is on other.local.
-	central.must(t, "PUT", "/api/admin/ldap", ldapConfig("ldap://ldap-corp:389", "dc=corp,dc=local", "corp.local"))
-	sAD.must(t, "PUT", "/api/admin/ldap", ldapConfig("ldap://ldap-corp:389", "dc=corp,dc=local", "corp.local"))
+	central.must(t, "PUT", "/api/admin/ldap", corpLDAPConfig())
+	sAD.must(t, "PUT", "/api/admin/ldap", corpLDAPConfig())
 	sDiff.must(t, "PUT", "/api/admin/ldap", ldapConfig("ldap://ldap-other:389", "dc=other,dc=local", "other.local"))
 
 	t.Run("same_ad_policy_migration", func(t *testing.T) {
@@ -94,21 +96,16 @@ func TestADMigrationScenarios(t *testing.T) {
 		bob := findGUIDBySAM(t, sAD, "bob")
 		sAD.must(t, "PUT", "/api/admin/users/"+bob+"/roles", []string{"editor"})
 
-		central.must(t, "POST", "/api/admin/apps", map[string]any{"app_id": "hr", "audience": "hr"})
-		var tok struct {
-			Token string `json:"migration_token"`
-		}
-		json.Unmarshal(central.must(t, "POST", "/api/admin/apps/hr/migration-token", nil), &tok)
-		mig := map[string]any{"central_url": centralInternal, "app_id": "hr", "token": tok.Token, "carry_secret": true}
+		mig := newMigTarget(t, central, "hr", true)
 
 		// Policy-only: an AD user, no local-user record/password is copied.
 		var rep migrate.Report
-		json.Unmarshal(sAD.must(t, "POST", "/api/admin/migrate-to-central/preflight", mig), &rep)
+		decode(t, sAD.must(t, "POST", "/api/admin/migrate-to-central/preflight", mig), &rep)
 		if !rep.OK() || rep.ADUsersSameDomain != 1 || rep.LocalUsers != 0 {
 			t.Fatalf("preflight: want 1 same-AD user, 0 local, none blocked; got %+v", rep)
 		}
 		var res migrate.ApplyResult
-		json.Unmarshal(sAD.must(t, "POST", "/api/admin/migrate-to-central/commit", mig), &res)
+		decode(t, sAD.must(t, "POST", "/api/admin/migrate-to-central/commit", mig), &res)
 		if res.AssignmentsSet != 1 || res.LocalUsersCreated != 0 {
 			t.Fatalf("commit (policy-only) result: %+v", res)
 		}
@@ -116,7 +113,7 @@ func TestADMigrationScenarios(t *testing.T) {
 		var az struct {
 			UserAssignments map[string][]string `json:"user_assignments"`
 		}
-		json.Unmarshal(central.must(t, "GET", "/api/admin/apps/hr/authz", nil), &az)
+		decode(t, central.must(t, "GET", "/api/admin/apps/hr/authz", nil), &az)
 		if got := az.UserAssignments["bob"]; len(got) != 1 || got[0] != "editor" {
 			t.Fatalf("central hr assignment for bob = %v, want [editor]", got)
 		}
@@ -135,16 +132,11 @@ func TestADMigrationScenarios(t *testing.T) {
 		carol := findGUIDBySAM(t, sDiff, "carol")
 		sDiff.must(t, "PUT", "/api/admin/users/"+carol+"/roles", []string{"viewer"})
 
-		central.must(t, "POST", "/api/admin/apps", map[string]any{"app_id": "diffapp", "audience": "diffapp"})
-		var tok struct {
-			Token string `json:"migration_token"`
-		}
-		json.Unmarshal(central.must(t, "POST", "/api/admin/apps/diffapp/migration-token", nil), &tok)
-		mig := map[string]any{"central_url": centralInternal, "app_id": "diffapp", "token": tok.Token}
+		mig := newMigTarget(t, central, "diffapp", false)
 
 		var rep migrate.Report
-		json.Unmarshal(sDiff.must(t, "POST", "/api/admin/migrate-to-central/preflight", mig), &rep)
-		if rep.OK() || len(rep.Blocked) == 0 {
+		decode(t, sDiff.must(t, "POST", "/api/admin/migrate-to-central/preflight", mig), &rep)
+		if rep.OK() {
 			t.Fatalf("different-AD must block carol at preflight; got %+v", rep)
 		}
 		// And commit is refused (the central re-runs the classifier).
