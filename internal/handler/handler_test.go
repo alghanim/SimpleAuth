@@ -2,10 +2,13 @@ package handler
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -415,6 +418,92 @@ func TestHostedLoginPage(t *testing.T) {
 	}
 	if ct := rec.Header().Get("Content-Type"); ct != "text/html; charset=utf-8" {
 		t.Fatalf("expected HTML content type, got %s", ct)
+	}
+}
+
+// TestHostedLoginClientIDRoundTrip pins the SA fix: the client_id an app sends
+// on GET /login must survive into (a) the rendered form as a hidden field and
+// (b) the credential POST, so the minted token carries THAT app's audience —
+// not the default app's. Regression for the ops-platform §6 finding.
+func TestHostedLoginClientIDRoundTrip(t *testing.T) {
+	h, _ := testSetup(t)
+	adm := adminHeaders()
+
+	// App with its own redirect allowlist + a local user.
+	w := doJSON(h, "POST", "/api/admin/apps", map[string]interface{}{
+		"app_id": "shop2", "audience": "shop2", "allow_local_users": true,
+		"redirect_uris": []string{"https://shop2.example/cb"},
+	}, adm)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create app: %d %s", w.Code, w.Body.String())
+	}
+	var app map[string]interface{}
+	parseJSON(t, w, &app)
+	secret := app["app_secret"].(string)
+	doJSON(h, "POST", "/api/app/users", map[string]interface{}{
+		"username": "buyer", "password": "buypass1",
+	}, basicAuth("shop2", secret))
+
+	// (a) GET /login?client_id=shop2 renders the hidden client_id field + SSO-link carry.
+	req := httptest.NewRequest("GET", "/login?client_id=shop2&redirect_uri="+url.QueryEscape("https://shop2.example/cb")+"&manual=1", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("login page: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `name="client_id" value="shop2"`) {
+		t.Fatal("rendered form must carry client_id as a hidden field")
+	}
+
+	// (b) credential POST with client_id mints a shop2-audience token.
+	form := url.Values{}
+	form.Set("redirect_uri", "https://shop2.example/cb")
+	form.Set("client_id", "shop2")
+	form.Set("username", "buyer")
+	form.Set("password", "buypass1")
+	form.Set("_csrf", "tok123")
+	preq := httptest.NewRequest("POST", "/login", strings.NewReader(form.Encode()))
+	preq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	preq.AddCookie(&http.Cookie{Name: "__csrf", Value: "tok123"})
+	prec := httptest.NewRecorder()
+	h.ServeHTTP(prec, preq)
+	if prec.Code != http.StatusFound {
+		t.Fatalf("hosted POST: expected 302, got %d %s", prec.Code, prec.Body.String())
+	}
+	loc := prec.Header().Get("Location")
+	if !strings.HasPrefix(loc, "https://shop2.example/cb#") {
+		t.Fatalf("expected redirect to app callback with fragment, got %q", loc)
+	}
+	frag, _ := url.ParseQuery(strings.SplitN(loc, "#", 2)[1])
+	access := frag.Get("access_token")
+	if access == "" {
+		t.Fatal("expected access_token in fragment")
+	}
+	parts := strings.Split(access, ".")
+	if len(parts) != 3 {
+		t.Fatalf("expected a JWT, got %q", access)
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	var claims map[string]interface{}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		t.Fatalf("unmarshal claims: %v", err)
+	}
+	audOK := false
+	switch aud := claims["aud"].(type) {
+	case string:
+		audOK = aud == "shop2"
+	case []interface{}:
+		for _, a := range aud {
+			if a == "shop2" {
+				audOK = true
+			}
+		}
+	}
+	if !audOK {
+		t.Fatalf("token must be shop2-audience (not the default app), aud=%v", claims["aud"])
 	}
 }
 

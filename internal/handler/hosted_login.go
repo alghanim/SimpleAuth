@@ -51,12 +51,13 @@ func validateCSRF(r *http.Request) bool {
 func (h *Handler) handleHostedLoginPage(w http.ResponseWriter, r *http.Request) {
 	redirectURI := r.URL.Query().Get("redirect_uri")
 	errorMsg := r.URL.Query().Get("error")
+	clientID := r.URL.Query().Get("client_id")
 
 	// Resolve the app from client_id and validate redirect_uri against the app's
 	// OWN allowlist (not the global one) before entering the session-SSO branch.
 	// Otherwise a session-cookie auto-login could deliver an app-scoped token to
 	// a globally-allowed URI the app never registered (F38 / regression of L1).
-	app, err := h.resolveApp(r.URL.Query().Get("client_id"))
+	app, err := h.resolveApp(clientID)
 	if err != nil {
 		http.Error(w, "unknown client", http.StatusBadRequest)
 		return
@@ -87,9 +88,18 @@ func (h *Handler) handleHostedLoginPage(w http.ResponseWriter, r *http.Request) 
 	ssoEnabled := h.getKeytabPath() != ""
 	ssoLink := ""
 	if ssoEnabled {
+		// Carry client_id alongside redirect_uri so the Kerberos endpoint mints a
+		// token for the app that initiated login, not the default app (SA round-trip).
 		ssoLink = h.url("/login/sso")
+		q := url.Values{}
 		if redirectURI != "" {
-			ssoLink += "?redirect_uri=" + url.QueryEscape(redirectURI)
+			q.Set("redirect_uri", redirectURI)
+		}
+		if clientID != "" {
+			q.Set("client_id", clientID)
+		}
+		if enc := q.Encode(); enc != "" {
+			ssoLink += "?" + enc
 		}
 	}
 
@@ -110,7 +120,9 @@ func (h *Handler) handleHostedLoginPage(w http.ResponseWriter, r *http.Request) 
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// %[1]s = redirectURI, %[2]s = errorHTML, %[3]s = ssoLink, %[4]s = csrfToken,
-	// %[5]s = ssoEnabled ("1"/""), %[6]s = autoSSO ("1"/""), %[7]d = delay seconds
+	// %[5]s = ssoEnabled ("1"/""), %[6]s = autoSSO ("1"/""), %[7]d = delay seconds,
+	// %[8]s = clientID (round-tripped through the form so the credential POST
+	// mints a token for the initiating app, not the default app)
 	ssoEnabledStr := ""
 	if ssoEnabled {
 		ssoEnabledStr = "1"
@@ -123,7 +135,7 @@ func (h *Handler) handleHostedLoginPage(w http.ResponseWriter, r *http.Request) 
 	if rs := h.runtimeSettings.get(); rs != nil && rs.AutoSSODelay > 0 {
 		ssoDelay = rs.AutoSSODelay
 	}
-	fmt.Fprintf(w, h.bp(hostedLoginHTML), html.EscapeString(redirectURI), errorHTML, ssoLink, csrfToken, ssoEnabledStr, autoSSOStr, ssoDelay)
+	fmt.Fprintf(w, h.bp(hostedLoginHTML), html.EscapeString(redirectURI), errorHTML, ssoLink, csrfToken, ssoEnabledStr, autoSSOStr, ssoDelay, html.EscapeString(clientID))
 }
 
 // handleHostedLoginSubmit processes the hosted login form submission.
@@ -340,8 +352,12 @@ func (h *Handler) redirectToLoginError(w http.ResponseWriter, r *http.Request, r
 		}
 	}
 	// No / disallowed redirect_uri — show SimpleAuth's own login page with error.
-	// manual=1 prevents auto-SSO from looping.
+	// manual=1 prevents auto-SSO from looping. Preserve client_id so the retry
+	// still targets the initiating app (round-trip; unknown ids 400 on the GET).
 	u := h.url("/login") + "?error=" + url.QueryEscape(msg) + "&manual=1"
+	if cid := r.FormValue("client_id"); cid != "" {
+		u += "&client_id=" + url.QueryEscape(cid)
+	}
 	http.Redirect(w, r, u, http.StatusFound)
 }
 
@@ -422,6 +438,7 @@ input:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 3px rgba(143,
   <div id="manual-form" class="manual-form">
     <form method="POST" action="{{BASE_PATH}}/login">
       <input type="hidden" name="redirect_uri" value="%[1]s">
+      <input type="hidden" name="client_id" value="%[8]s">
       <input type="hidden" name="_csrf" value="%[4]s">
       <label>Username</label>
       <input type="text" name="username" placeholder="Enter your username" autofocus required>
