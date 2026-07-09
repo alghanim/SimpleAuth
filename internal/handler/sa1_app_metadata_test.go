@@ -80,6 +80,8 @@ func TestSA1_BaseURLValidation(t *testing.T) {
 		{"fragment", map[string]interface{}{"app_id": "a5", "base_url": "https://x.example.com#f"}},
 		{"icon absolute url", map[string]interface{}{"app_id": "a6", "base_url": "https://x.example.com", "icon": "https://evil.example.com/i.svg"}},
 		{"icon traversal", map[string]interface{}{"app_id": "a7", "base_url": "https://x.example.com", "icon": "/../secret"}},
+		{"icon encoded traversal", map[string]interface{}{"app_id": "a8", "base_url": "https://x.example.com", "icon": "/%2E%2E/bar/x.svg"}},
+		{"icon encoded slashes", map[string]interface{}{"app_id": "a9", "base_url": "https://x.example.com", "icon": "/%2F%2Fevil"}},
 	}
 	for _, tc := range bad {
 		if w := doJSON(h, "POST", "/api/admin/apps", tc.body, adm); w.Code != http.StatusBadRequest {
@@ -92,5 +94,19 @@ func TestSA1_BaseURLValidation(t *testing.T) {
 		"app_id": "ok", "base_url": "https://apps.example.com/billing/",
 	}, adm); w.Code != http.StatusCreated {
 		t.Fatalf("valid base_url rejected: %d %s", w.Code, w.Body.String())
+	}
+
+	// A percent-encoded reserved char in the path must be PRESERVED, not decoded
+	// into a delimiter (would corrupt the stored URL and break icon_url).
+	w := doJSON(h, "POST", "/api/admin/apps", map[string]interface{}{
+		"app_id": "enc", "base_url": "https://apps.example.com/team%23finance",
+	}, adm)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("encoded base_url path rejected: %d %s", w.Code, w.Body.String())
+	}
+	var created map[string]interface{}
+	parseJSON(t, w, &created)
+	if created["base_url"] != "https://apps.example.com/team%23finance" {
+		t.Fatalf("base_url must preserve %%23, got %v", created["base_url"])
 	}
 }
