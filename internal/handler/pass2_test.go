@@ -526,6 +526,65 @@ func TestM10_DisabledAppStopsRefresh(t *testing.T) {
 	}
 }
 
+// TestM10_DisabledAppStopsOIDCRefresh pins the M10 guarantee on the SECOND
+// refresh path — the OIDC `refresh_token` grant at the /realms/.../token
+// endpoint — which resolves the app the same way (oidc.go handleOIDCTokenRefresh
+// -> resolveApp) and must likewise refuse a disabled app. This closes the
+// "both refresh paths" gap the ops-platform SA-6 review flagged: the sibling
+// test above covers /api/auth/refresh; this covers the OIDC grant.
+func TestM10_DisabledAppStopsOIDCRefresh(t *testing.T) {
+	h, s := testSetup(t)
+	adm := adminHeaders()
+
+	w := doJSON(h, "POST", "/api/admin/apps", map[string]interface{}{
+		"app_id": "shop", "audience": "shop", "allow_local_users": true,
+	}, adm)
+	var app map[string]interface{}
+	parseJSON(t, w, &app)
+	secret := app["app_secret"].(string)
+	doJSON(h, "POST", "/api/app/users", map[string]interface{}{"username": "shopper", "password": "shoppass1"}, basicAuth("shop", secret))
+
+	w = doJSON(h, "POST", "/api/auth/login", map[string]interface{}{
+		"username": "shopper", "password": "shoppass1", "app_id": "shop",
+	}, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("login: %d %s", w.Code, w.Body.String())
+	}
+	var tok map[string]interface{}
+	parseJSON(t, w, &tok)
+	refreshToken := tok["refresh_token"].(string)
+
+	// Sanity: the refresh token works at the OIDC grant BEFORE disabling — proving
+	// the later 401 is the disabled-app guard, not a bad-token or wiring failure.
+	// (Refresh is single-use, so mint a fresh one for the negative case below.)
+	form := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {refreshToken}}
+	req := httptest.NewRequest("POST", "/realms/test-issuer/protocol/openid-connect/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	pre := httptest.NewRecorder()
+	h.ServeHTTP(pre, req)
+	if pre.Code != http.StatusOK {
+		t.Fatalf("OIDC refresh before disable should succeed, got %d %s", pre.Code, pre.Body.String())
+	}
+	var refreshed map[string]interface{}
+	parseJSON(t, pre, &refreshed)
+	rt2 := refreshed["refresh_token"].(string)
+
+	// Disable the app, then refresh via the OIDC grant -> clean 401, no mint/500.
+	sa, _ := s.GetApp("shop")
+	sa.Disabled = true
+	if err := s.UpdateApp(sa); err != nil {
+		t.Fatalf("disable app: %v", err)
+	}
+	form2 := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {rt2}}
+	req2 := httptest.NewRequest("POST", "/realms/test-issuer/protocol/openid-connect/token", strings.NewReader(form2.Encode()))
+	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusUnauthorized {
+		t.Fatalf("OIDC refresh into a disabled app must be 401, got %d %s", w2.Code, w2.Body.String())
+	}
+}
+
 // TestH6_RequireAssignmentFailsClosed covers Audit Pass 2 / H6: an app that sets
 // require_assignment=true but has NOT defined any per-app authz must DENY directory
 // users (fail closed), not fall back to admitting them with their global roles.
