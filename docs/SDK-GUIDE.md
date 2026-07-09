@@ -23,6 +23,29 @@ Official SDKs for JavaScript/TypeScript, Go, Python, and .NET. All SDKs use dire
 
 ---
 
+## User self-service endpoints (portal / shell)
+
+Beyond the SDK client methods below, a central SimpleAuth exposes cross-app,
+user-centric endpoints that a portal or a module shell calls directly — plain
+authenticated HTTP with the **user's own access token of any audience** (no SDK
+method needed, no admin key). Full reference in [API.md](API.md#user-self-service-v2):
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/user/apps` | The apps this user may enter (app-switcher / grid), with each app's `base_url` + presentation metadata. Supports `ETag`/`304`. |
+| `POST /api/user/logout-all` | Log the user out everywhere (revoke refresh families + SSO sessions). |
+| `GET` / `PUT /api/user/preferences` | Per-user UI prefs (`theme`, `lang`, `dir`, `rail_collapsed`) that survive cross-origin module navigation. |
+
+```js
+// e.g. the portal builds its grid from the user's own token — any audience works
+const res = await fetch(`${BASE_URL}/api/user/apps`, {
+  headers: { Authorization: `Bearer ${accessToken}` },
+});
+const apps = await res.json(); // [{ app_id, base_url, display_name, category, icon_url }]
+```
+
+---
+
 ## JavaScript / TypeScript
 
 ### Installation
