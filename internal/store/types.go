@@ -217,10 +217,12 @@ type RuntimeSettings struct {
 	DefaultRoles             []string `json:"default_roles"`
 	RateLimitMax             int      `json:"rate_limit_max"`
 	RateLimitWindowS         int      `json:"rate_limit_window_s"` // seconds
+	RateLimitDisabled        bool     `json:"rate_limit_disabled"` // zero value keeps the limiter ON — only an explicit true turns it off (F25)
 	AuditRetentionDays       int      `json:"audit_retention_days"`
 	AutoSSO                  bool     `json:"auto_sso"`
 	AutoSSODelay             int      `json:"auto_sso_delay"` // seconds, default 3
 	EnableSessionSSO         bool     `json:"enable_session_sso"`
 	SessionSSOIdleHours      int      `json:"session_sso_idle_hours"` // default 8
 	SessionSSOMaxHours       int      `json:"session_sso_max_hours"`  // default 720 (30 days)
+	Version                  int      `json:"version"`                // optimistic-concurrency token: PUT echoes it, the server bumps it; 0 = client sent none (legacy last-writer-wins)
 }

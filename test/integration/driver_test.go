@@ -31,9 +31,11 @@ func env(k, d string) string {
 var (
 	centralURL      = env("ITEST_CENTRAL_URL", "https://127.0.0.1:9443")
 	centralInternal = env("ITEST_CENTRAL_INTERNAL", "https://central:8080")
-	standaloneURL   = env("ITEST_STANDALONE_URL", "http://127.0.0.1:9444")
+	standaloneURL   = env("ITEST_STANDALONE_URL", "http://127.0.0.1:9447")
+	standaloneADURL = env("ITEST_STANDALONE_AD_URL", "http://127.0.0.1:9445")
 	centralKey      = env("ITEST_CENTRAL_KEY", "central-admin-key")
 	standaloneKey   = env("ITEST_STANDALONE_KEY", "local-admin-key")
+	standaloneADKey = env("ITEST_STANDALONE_AD_KEY", "ad-admin-key")
 )
 
 // node is a thin admin-API client for one SimpleAuth instance.
@@ -42,7 +44,9 @@ type node struct {
 	c         *http.Client
 }
 
-func (n *node) do(t *testing.T, method, path string, body any) (int, []byte) {
+// request is the single request path for a node; auth stamps the credentials
+// (admin bearer for do/must, app Basic for doBasic).
+func (n *node) request(t *testing.T, method, path string, body any, auth func(*http.Request)) (int, []byte) {
 	t.Helper()
 	var r io.Reader
 	if body != nil {
@@ -54,8 +58,8 @@ func (n *node) do(t *testing.T, method, path string, body any) (int, []byte) {
 		t.Fatalf("new request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if n.key != "" {
-		req.Header.Set("Authorization", "Bearer "+n.key)
+	if auth != nil {
+		auth(req)
 	}
 	resp, err := n.c.Do(req)
 	if err != nil {
@@ -66,6 +70,24 @@ func (n *node) do(t *testing.T, method, path string, body any) (int, []byte) {
 	return resp.StatusCode, data
 }
 
+func (n *node) do(t *testing.T, method, path string, body any) (int, []byte) {
+	t.Helper()
+	return n.request(t, method, path, body, func(req *http.Request) {
+		if n.key != "" {
+			req.Header.Set("Authorization", "Bearer "+n.key)
+		}
+	})
+}
+
+// doBasic issues a request authenticated with app credentials (HTTP Basic)
+// instead of the admin bearer key — the /api/app/* self-service flow.
+func (n *node) doBasic(t *testing.T, method, path, id, secret string) (int, []byte) {
+	t.Helper()
+	return n.request(t, method, path, nil, func(req *http.Request) {
+		req.SetBasicAuth(id, secret)
+	})
+}
+
 func (n *node) must(t *testing.T, method, path string, body any) []byte {
 	t.Helper()
 	code, data := n.do(t, method, path, body)
@@ -73,6 +95,15 @@ func (n *node) must(t *testing.T, method, path string, body any) []byte {
 		t.Fatalf("%s %s -> %d: %s", method, path, code, data)
 	}
 	return data
+}
+
+// decode unmarshals a JSON response body, failing the test on malformed JSON
+// rather than letting a zero value produce a misleading assertion failure later.
+func decode(t *testing.T, data []byte, v any) {
+	t.Helper()
+	if err := json.Unmarshal(data, v); err != nil {
+		t.Fatalf("decode response %q: %v", data, err)
+	}
 }
 
 // caClient trusts the integration CA so the host-side driver can validate the
@@ -143,6 +174,56 @@ func has(s []string, v string) bool {
 	return false
 }
 
+// login performs a SINGLE login attempt and returns the access token. Use it
+// for deterministic (local-account) logins; use loginRetry only for LDAP-backed
+// logins that may race the directory's bootstrap.
+func login(t *testing.T, n *node, username, password, appID string) string {
+	t.Helper()
+	body := map[string]any{"username": username, "password": password}
+	if appID != "" {
+		body["app_id"] = appID
+	}
+	var r struct {
+		AccessToken string `json:"access_token"`
+	}
+	decode(t, n.must(t, "POST", "/api/auth/login", body), &r)
+	if r.AccessToken == "" {
+		t.Fatalf("login %q: no access token in response", username)
+	}
+	return r.AccessToken
+}
+
+// mintToken mints a single-use migration token for an app on the central.
+func mintToken(t *testing.T, central *node, appID string) string {
+	t.Helper()
+	var tok struct {
+		Token string `json:"migration_token"`
+	}
+	decode(t, central.must(t, "POST", "/api/admin/apps/"+appID+"/migration-token", nil), &tok)
+	if tok.Token == "" {
+		t.Fatalf("no migration token for %s", appID)
+	}
+	return tok.Token
+}
+
+// migPayload mints a fresh token and builds the migrate-to-central request body.
+func migPayload(t *testing.T, central *node, appID string, carrySecret bool) map[string]any {
+	t.Helper()
+	mig := map[string]any{"central_url": centralInternal, "app_id": appID, "token": mintToken(t, central, appID)}
+	if carrySecret {
+		mig["carry_secret"] = true
+	}
+	return mig
+}
+
+// newMigTarget creates a fresh app on the central and returns the migration
+// payload a standalone posts to move into it.
+func newMigTarget(t *testing.T, central *node, appID string, carrySecret bool) map[string]any {
+	t.Helper()
+	central.must(t, "POST", "/api/admin/apps", map[string]any{"app_id": appID, "audience": appID})
+	return migPayload(t, central, appID, carrySecret)
+}
+
 // TestLocalToCentralMigration: a local-accounts standalone migrates into a fresh
 // app on the central over real cross-container TLS; the migrated user then logs
 // in AGAINST THE CENTRAL with the same password and gets the right roles/perms.
@@ -162,7 +243,7 @@ func TestLocalToCentralMigration(t *testing.T) {
 	var u struct {
 		GUID string `json:"guid"`
 	}
-	json.Unmarshal(standalone.must(t, "POST", "/api/admin/users", map[string]any{
+	decode(t, standalone.must(t, "POST", "/api/admin/users", map[string]any{
 		"display_name": "Alice", "password": "alicepass123",
 	}), &u)
 	standalone.must(t, "PUT", "/api/admin/users/"+u.GUID+"/mappings", map[string]any{"provider": "local", "external_id": "alice"})
@@ -173,22 +254,16 @@ func TestLocalToCentralMigration(t *testing.T) {
 
 	// --- central: create the target app + mint a single-use migration token ---
 	central.must(t, "POST", "/api/admin/apps", map[string]any{"app_id": "billing", "audience": "billing"})
-	var tok struct {
-		Token string `json:"migration_token"`
-	}
-	json.Unmarshal(central.must(t, "POST", "/api/admin/apps/billing/migration-token", nil), &tok)
-	if tok.Token == "" {
-		t.Fatal("central returned no migration token")
-	}
+	tok := mintToken(t, central, "billing")
 
 	// --- guard: a cleartext http push to the (non-loopback) central is refused ---
 	if code, _ := standalone.do(t, "POST", "/api/admin/migrate-to-central/preflight", map[string]any{
-		"central_url": "http://central:8080", "app_id": "billing", "token": tok.Token,
+		"central_url": "http://central:8080", "app_id": "billing", "token": tok,
 	}); code != http.StatusBadRequest {
 		t.Fatalf("cleartext http migration push must be 400, got %d", code)
 	}
 
-	mig := map[string]any{"central_url": centralInternal, "app_id": "billing", "token": tok.Token, "carry_secret": true}
+	mig := map[string]any{"central_url": centralInternal, "app_id": "billing", "token": tok, "carry_secret": true}
 
 	// --- preflight (dry run) over real TLS ---
 	var rep migrate.Report

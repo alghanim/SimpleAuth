@@ -41,6 +41,9 @@ services:
       AUTH_POSTGRES_URL: "postgres://postgres:itest@postgres:5432/simpleauth?sslmode=disable"
       AUTH_TLS_CERT: /certs/central.crt
       AUTH_TLS_KEY: /certs/central.key
+      # All host-driven test traffic arrives from ONE docker-proxy IP; the 10/min
+      # default login limit would turn exact-status auth assertions into 429 flakes.
+      AUTH_RATE_LIMIT_MAX: "1000"
     volumes:
       - ./certs/central.crt:/certs/central.crt:ro
       - ./certs/central.key:/certs/central.key:ro
@@ -63,13 +66,16 @@ services:
       AUTH_BASE_PATH: "/"
       AUTH_JWT_ISSUER: standalone-local
       AUTH_DATA_DIR: /data
+      AUTH_RATE_LIMIT_MAX: "1000"
       # Trust the central's internal CA so the HTTPS migration push validates.
       SSL_CERT_FILE: /certs/ca.crt
     volumes:
       - standalone-local-data:/data
       - ./certs/ca.crt:/certs/ca.crt:ro
     ports:
-      - "127.0.0.1:9444:8080"
+      # 9444 is prone to collisions with other local stacks; 9447 keeps the
+      # harness's loopback ports clear of them.
+      - "127.0.0.1:9447:8080"
     depends_on:
       - central
 
@@ -108,6 +114,7 @@ services:
       AUTH_BASE_PATH: "/"
       AUTH_JWT_ISSUER: standalone-ad
       AUTH_DATA_DIR: /data
+      AUTH_RATE_LIMIT_MAX: "1000"
       SSL_CERT_FILE: /certs/ca.crt
     volumes:
       - standalone-ad-data:/data
@@ -130,6 +137,7 @@ services:
       AUTH_BASE_PATH: "/"
       AUTH_JWT_ISSUER: standalone-addiff
       AUTH_DATA_DIR: /data
+      AUTH_RATE_LIMIT_MAX: "1000"
       SSL_CERT_FILE: /certs/ca.crt
     volumes:
       - standalone-addiff-data:/data

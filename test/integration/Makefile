@@ -23,8 +23,11 @@ ps:
 logs:
 	$(COMPOSE) logs -f
 
-## test: up + run the Go scenario driver (from the repo root) + tear down
-test: up
+## test: FRESH stack + run the Go scenario driver (from the repo root) + tear down.
+## The down first is load-bearing: the scenarios assert exact counts against clean
+## stores, and the LDAP bootstrap LDIF only seeds a fresh (empty) directory — a
+## stack left over from `make up` would run against stale fixtures.
+test: down up
 	@cd ../.. && ITEST_CA_FILE=$(CADIR)/ca.crt go test -tags integration -count=1 -v ./test/integration/ ; \
 	  rc=$$? ; $(COMPOSE) down -v --remove-orphans ; exit $$rc
 

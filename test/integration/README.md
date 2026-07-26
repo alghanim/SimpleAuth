@@ -7,11 +7,16 @@ the parts the Go unit tests can't reach. **It does not touch the production
 
 ```bash
 cd test/integration
-make test      # up + run the Go scenario driver + tear down
+make test      # FRESH stack + run the Go scenario driver + tear down
 make up        # just stand up the env; browse https://localhost:9443/admin
 make down      # tear down + wipe volumes
 make logs      # follow logs
 ```
+
+`make test` always recreates the stack first: the scenarios assert exact counts
+against clean stores, and the LDAP seed LDIF only applies to a fresh (empty)
+directory — asserting against a stack left over from `make up` would silently
+run stale fixtures.
 
 Requires Docker + Compose + openssl + Go (the driver runs on the host).
 
@@ -27,7 +32,7 @@ Requires Docker + Compose + openssl + Go (the driver runs on the host).
 | `ldap-corp` / `ldap-other` | OpenLDAP directories (`uid`/seed LDIF) | corp.local / other.local |
 
 Published to the host (loopback only): central `https://localhost:9443`,
-standalone-local `:9444`, standalone-ad `:9445`, standalone-addiff `:9446`.
+standalone-local `:9447`, standalone-ad `:9445`, standalone-addiff `:9446`.
 
 ### Cross-container TLS
 
@@ -85,9 +90,10 @@ samba schema); AD users are provisioned via the login/JIT path.
   account: the AD user migrates policy-only, the local one carries its hash, and
   both authenticate on the central.
 - **group_to_role** — `bob` gets a role on a central app purely via **group
-  membership** (he's in `Finance`), with no per-user assignment. (The fixture
-  carries group membership in `ou` and points `groups_attr` at it, to avoid the
-  OpenLDAP memberof overlay; the group→role code path is identical.)
+  membership** (he's in the `Finance` group), with no per-user assignment. The
+  directory's memberof overlay stamps bob with the DN-shaped `memberOf` value
+  real AD emits (see `ldap/corp.ldif`), and SimpleAuth extracts the CN — so the
+  assignment is keyed by the bare group name, exactly as in production.
 
 > Not wired into CI by design — it's a local/manual harness (`make up` to explore,
 > `make test` to assert). Run it when you touch the migration paths.

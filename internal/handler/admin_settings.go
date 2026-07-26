@@ -32,7 +32,16 @@ func (c *runtimeSettingsCache) set(rs *store.RuntimeSettings) {
 func (h *Handler) initRuntimeSettings() {
 	existing, _ := h.store.GetRuntimeSettings()
 	if existing != nil {
+		// Normalize legacy documents (pre-clamp PUTs could persist zeroed
+		// rate-limit numbers) so GET/UI always report the values the limiter
+		// actually runs; persist the one-time upgrade.
+		oldMax, oldWin := existing.RateLimitMax, existing.RateLimitWindowS
+		h.normalizeRateLimit(existing)
+		if existing.RateLimitMax != oldMax || existing.RateLimitWindowS != oldWin {
+			h.store.SaveRuntimeSettings(existing)
+		}
 		h.runtimeSettings.set(existing)
+		h.applyRateLimit(existing)
 		return
 	}
 
@@ -61,6 +70,53 @@ func (h *Handler) initRuntimeSettings() {
 	}
 	h.store.SaveRuntimeSettings(rs)
 	h.runtimeSettings.set(rs)
+	h.applyRateLimit(rs)
+}
+
+// Bounds for the runtime rate limit. The fallback chain for an omitted/zeroed
+// number is deployment config first, then these compiled-in defaults — so a
+// normalized document always carries positive values and the persisted doc,
+// the cache, and the live limiter cannot diverge. The window ceiling also
+// keeps time.Duration(windowS)*time.Second far away from int64 overflow.
+const (
+	defaultRateLimitMax     = 10
+	defaultRateLimitWindowS = 60
+	maxRateLimitMax         = 1_000_000_000
+	maxRateLimitWindowS     = 86_400 // 1 day
+)
+
+// normalizeRateLimit clamps the rate-limit numbers into sane bounds (F25:
+// omitted/zeroed values fall back, absurd values are capped). Turning the
+// limiter off is only ever the explicit rate_limit_disabled boolean.
+func (h *Handler) normalizeRateLimit(rs *store.RuntimeSettings) {
+	if rs.RateLimitMax < 1 {
+		rs.RateLimitMax = h.cfg.RateLimitMax
+	}
+	if rs.RateLimitMax < 1 {
+		rs.RateLimitMax = defaultRateLimitMax
+	}
+	if rs.RateLimitMax > maxRateLimitMax {
+		rs.RateLimitMax = maxRateLimitMax
+	}
+	if rs.RateLimitWindowS < 1 {
+		rs.RateLimitWindowS = int(h.cfg.RateLimitWindow.Seconds())
+	}
+	if rs.RateLimitWindowS < 1 {
+		rs.RateLimitWindowS = defaultRateLimitWindowS
+	}
+	if rs.RateLimitWindowS > maxRateLimitWindowS {
+		rs.RateLimitWindowS = maxRateLimitWindowS
+	}
+}
+
+// applyRateLimit pushes the persisted rate-limit settings into the live
+// limiter — the admin decides at runtime whether and how tightly the
+// login-shaped endpoints are limited, without a restart.
+func (h *Handler) applyRateLimit(rs *store.RuntimeSettings) {
+	if rs == nil {
+		return
+	}
+	h.loginLimiter.setConfig(rs.RateLimitMax, time.Duration(rs.RateLimitWindowS)*time.Second, rs.RateLimitDisabled)
 }
 
 // --- Accessor helpers (read from cache) ---
@@ -181,13 +237,47 @@ func (h *Handler) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "cors_origins cannot be '*' — list explicit origins", http.StatusBadRequest)
 		return
 	}
+	h.normalizeRateLimit(&rs)
+
+	// Serialize version-check → save → cache-set → limiter-apply: concurrent
+	// PUTs must not leave the store, the cache, and the live limiter with
+	// different states.
+	h.settingsMu.Lock()
+	defer h.settingsMu.Unlock()
+
+	old := h.runtimeSettings.get()
+	// Optimistic concurrency: a client that echoes a version (the admin UI
+	// always does) is rejected if the document changed since it was loaded —
+	// a stale tab must not silently revert another admin's change (e.g. flip
+	// rate_limit_disabled back on). A client that sends no version keeps the
+	// legacy last-writer-wins behavior.
+	if rs.Version != 0 && old != nil && rs.Version != old.Version {
+		jsonError(w, "settings changed since they were loaded — reload and retry", http.StatusConflict)
+		return
+	}
+	if old != nil {
+		rs.Version = old.Version + 1
+	} else {
+		rs.Version = 1
+	}
 
 	if err := h.store.SaveRuntimeSettings(&rs); err != nil {
 		jsonError(w, "failed to save settings: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
+	// Changing the rate-limit posture (on/off, limit, or window) is a
+	// security event — leave a dedicated audit trail with old and new values
+	// beyond the generic settings_updated event.
+	if old != nil && (old.RateLimitDisabled != rs.RateLimitDisabled || old.RateLimitMax != rs.RateLimitMax || old.RateLimitWindowS != rs.RateLimitWindowS) {
+		h.audit("rate_limit_changed", "admin", getClientIP(r), map[string]interface{}{
+			"disabled": rs.RateLimitDisabled, "max": rs.RateLimitMax, "window_s": rs.RateLimitWindowS,
+			"old_disabled": old.RateLimitDisabled, "old_max": old.RateLimitMax, "old_window_s": old.RateLimitWindowS,
+		})
+	}
+
 	h.runtimeSettings.set(&rs)
+	h.applyRateLimit(&rs)
 	h.audit("settings_updated", "admin", getClientIP(r), nil)
 	jsonResp(w, rs, http.StatusOK)
 }

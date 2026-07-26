@@ -37,6 +37,10 @@ type Handler struct {
 	// migrationMu serializes a migration commit's token-claim + Apply + consume so
 	// the single-use token cannot be raced into a double import.
 	migrationMu sync.Mutex
+	// settingsMu serializes a settings PUT's version-check + save + cache-set +
+	// limiter-apply so concurrent updates cannot leave the store, the cache, and
+	// the live rate limiter with different states.
+	settingsMu sync.Mutex
 }
 
 func New(cfg *config.Config, s store.Store, jwtMgr *auth.JWTManager, uiFS fs.FS, version string) *Handler {

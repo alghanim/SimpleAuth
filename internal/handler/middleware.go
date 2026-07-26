@@ -47,6 +47,7 @@ type rateLimiter struct {
 	counters map[string]*ipCounter
 	limit    int
 	window   time.Duration
+	disabled bool
 }
 
 type ipCounter struct {
@@ -64,9 +65,37 @@ func newRateLimiter(limit int, window time.Duration) *rateLimiter {
 	return rl
 }
 
+// setConfig applies the admin's runtime rate-limit settings to the live
+// limiter (Settings → Rate Limiting) — no restart needed. Non-positive
+// limit/window mean "no opinion" and keep the current values.
+func (rl *rateLimiter) setConfig(limit int, window time.Duration, disabled bool) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	if limit > 0 {
+		rl.limit = limit
+	}
+	// Existing counters carry resetAt stamps from the old window (or from
+	// before a disable) — keeping them would contradict "changes apply
+	// immediately" with stale 429s/Retry-After long after the admin relaxed
+	// the policy. Start clean when the window or the on/off state changes; a
+	// limit-only change needs no reset (allow() compares against the new
+	// limit immediately).
+	if (window > 0 && window != rl.window) || disabled != rl.disabled {
+		rl.counters = make(map[string]*ipCounter)
+	}
+	if window > 0 {
+		rl.window = window
+	}
+	rl.disabled = disabled
+}
+
 func (rl *rateLimiter) allow(ip string) bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
+
+	if rl.disabled {
+		return true
+	}
 
 	now := time.Now()
 	c, ok := rl.counters[ip]
