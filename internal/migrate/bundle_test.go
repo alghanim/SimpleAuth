@@ -194,6 +194,36 @@ func TestApply_DoesNotDowngradeRequireAssignment(t *testing.T) {
 	}
 }
 
+// TestApply_ValidatesPresentationFields: a bundle from a lower-trust source must
+// not plant an unvalidated launch target. An invalid base_url/icon (which the
+// admin write path would reject) is skipped on import; a valid one carries.
+func TestApply_ValidatesPresentationFields(t *testing.T) {
+	central := open(t)
+	must(t, central.CreateApp(&store.App{AppID: "portal", Audience: "portal"}))
+	// A malicious bundle: non-https phishing origin + an off-origin icon.
+	bad := &Bundle{SchemaRev: SchemaRev, App: AppConfig{
+		BaseURL: "http://evil.example", Icon: "../../evil",
+	}}
+	if _, err := Apply(bad, central, "portal", false); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if app, _ := central.GetApp("portal"); app.BaseURL != "" || app.Icon != "" {
+		t.Fatalf("invalid base_url/icon must be skipped, got base_url=%q icon=%q", app.BaseURL, app.Icon)
+	}
+
+	// A valid bundle carries (and normalizes) the values.
+	must(t, central.CreateApp(&store.App{AppID: "portal2", Audience: "portal2"}))
+	good := &Bundle{SchemaRev: SchemaRev, App: AppConfig{
+		BaseURL: "https://portal.example.com/", Icon: "/icon.svg",
+	}}
+	if _, err := Apply(good, central, "portal2", false); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if app, _ := central.GetApp("portal2"); app.BaseURL != "https://portal.example.com" || app.Icon != "/icon.svg" {
+		t.Fatalf("valid base_url/icon must carry normalized, got base_url=%q icon=%q", app.BaseURL, app.Icon)
+	}
+}
+
 // TestClassify_FreshTargetGuard: refuse to migrate into an app that already has
 // per-app authorization (would clobber an in-use app).
 func TestClassify_FreshTargetGuard(t *testing.T) {

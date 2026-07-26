@@ -348,6 +348,112 @@ curl -k -X POST https://auth.example.com/sauth/api/auth/reset-password \
 
 ---
 
+## User Self-Service (v2)
+
+Endpoints a user (or the platform on the user's behalf) calls with **their own access
+token of any registered audience** — no master key, no app secret. Each acts only on the
+token's subject, and all reject app-management, refresh, and ID tokens (same discipline as
+`/api/auth/userinfo`). Useful when one central SimpleAuth serves many audience-scoped apps
+and no single app token can answer cross-app, user-centric questions.
+
+### `GET /api/user/apps`
+
+**Auth:** Bearer Token (any audience)
+
+Returns the apps the caller **may enter** — the authoritative source for a portal
+app-switcher / grid. An app is included when the user would be admitted to it at token
+issuance (direct assignment, AD-group assignment, or an app with `require_assignment:false`)
+**and** it is launchable: not disabled, not the default directory app, and has a `base_url`.
+The payload is deliberately minimal (no roles/permissions/assignment source). Supports
+`ETag` / `If-None-Match` for cheap `304` revalidation on every navigation.
+
+```bash
+curl -k -H "Authorization: Bearer ACCESS_TOKEN" \
+  https://auth.example.com/sauth/api/user/apps
+```
+
+**Response (200):**
+
+```json
+[
+  {
+    "app_id": "billing",
+    "base_url": "https://billing.example.com",
+    "display_name": { "en": "Billing", "ar": "الفوترة" },
+    "category": "finance",
+    "icon_url": "https://billing.example.com/.well-known/ops-module-icon.svg"
+  }
+]
+```
+
+`icon_url` is `base_url` + the app's `icon` path (empty string when no icon is set).
+`display_name` falls back to `{"en": <app name>}` when unset.
+
+### `POST /api/user/logout-all`
+
+**Auth:** Bearer Token (any audience)
+
+Logs the caller out **everywhere**: revokes all of their refresh-token families and deletes
+their shared `__sa_sso` sessions, so no module can silently re-mint a token. The target is
+always the token subject — a user can only log **themselves** out. Under offline JWKS
+verification an already-issued access token stays valid until its `exp`, so residual access
+is bounded by the access-token TTL; a fresh login works immediately (no self-lockout).
+
+```bash
+curl -k -X POST -H "Authorization: Bearer ACCESS_TOKEN" \
+  https://auth.example.com/sauth/api/user/logout-all
+```
+
+**Response (200):**
+
+```json
+{"status": "logged out everywhere (refresh tokens + SSO sessions revoked)"}
+```
+
+### `GET /api/user/preferences` · `PUT /api/user/preferences`
+
+**Auth:** Bearer Token (any audience)
+
+A small, per-user, app-agnostic UI-preference document that survives a cross-origin module
+navigation (per-origin `localStorage`/cookies cannot). It is a **fixed, validated schema**,
+not a free-form key/value store.
+
+| Field | Type | Values |
+|---|---|---|
+| `theme` | string | `light` \| `dark` \| `system` (default `system`) |
+| `lang` | string | BCP-47 language tag (default `en`) |
+| `dir` | string | `ltr` \| `rtl` (default `ltr`) |
+| `rail_collapsed` | bool | default `false` |
+
+`GET` returns the stored document, or defaults if never set. `PUT` is a full-document
+replace (last-write-wins): unknown keys are rejected (`400`), each value is validated, and
+the body is capped at 2 KiB. Preferences are deleted with the user.
+
+```bash
+# read
+curl -k -H "Authorization: Bearer ACCESS_TOKEN" \
+  https://auth.example.com/sauth/api/user/preferences
+
+# write (full-document replace)
+curl -k -X PUT -H "Authorization: Bearer ACCESS_TOKEN" -H "Content-Type: application/json" \
+  -d '{"theme":"dark","lang":"ar","dir":"rtl","rail_collapsed":true}' \
+  https://auth.example.com/sauth/api/user/preferences
+```
+
+**Response (200):**
+
+```json
+{"theme": "dark", "lang": "ar", "dir": "rtl", "rail_collapsed": true}
+```
+
+**Error response (400):**
+
+```json
+{"error": "theme must be one of: light, dark, system"}
+```
+
+---
+
 ### `GET /` (Root)
 
 **Auth:** None
@@ -2536,7 +2642,7 @@ require the master admin key.
 | `POST` | `/api/admin/apps` | Register an app → returns it + `app_secret` (once). |
 | `GET` | `/api/admin/apps` | List apps (never returns secrets). |
 | `GET` | `/api/admin/apps/{app_id}` | Get one app. |
-| `PUT` | `/api/admin/apps/{app_id}` | Update name / audience / redirect_uris / cors_origins / require_assignment / allow_local_users / disabled. |
+| `PUT` | `/api/admin/apps/{app_id}` | Update name / audience / redirect_uris / cors_origins / require_assignment / allow_local_users / disabled / base_url / display_name / category / icon. |
 | `DELETE` | `/api/admin/apps/{app_id}` | Delete an app. |
 | `POST` | `/api/admin/apps/{app_id}/rotate-secret` | Issue a new `app_secret` (returned once). |
 
@@ -2553,6 +2659,19 @@ Fields: `app_id` (optional — derived from `name` if omitted; lowercase
 `cors_origins`, `require_assignment` (default `false`), `allow_local_users`
 (default `false`). On first v2 startup a **default app** is auto-created from your
 existing single-client config so v1 deployments keep working unchanged.
+
+**Presentation metadata** (for a portal app-switcher / grid; pure static data —
+SimpleAuth never dereferences `base_url`):
+
+| Field | Type | Notes |
+|---|---|---|
+| `base_url` | string | The module's canonical origin. Must be an absolute `https://` URL with a host, optional path prefix, no userinfo/query/fragment (normalized, trailing slash stripped). Empty ⇒ a non-launchable app (excluded from `GET /api/user/apps`). |
+| `display_name` | object | Locale→name map, e.g. `{"en":"Billing","ar":"الفوترة"}`. |
+| `category` | string | Opaque grouping label for the portal. |
+| `icon` | string | A **rooted relative path** under `base_url` (e.g. `/.well-known/ops-module-icon.svg`) — never inline bytes or an absolute URL. `GET /api/user/apps` returns the computed absolute `icon_url`. |
+
+These four fields are writable only via this master-gated admin API (never an
+app-secret path); a `base_url` change is audited with its old and new value.
 
 ### Audience-scoped tokens (Milestone 2)
 

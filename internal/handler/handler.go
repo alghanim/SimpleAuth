@@ -160,6 +160,11 @@ func (h *Handler) registerRoutes(uiFS fs.FS) {
 	h.mux.HandleFunc("POST /api/auth/login", h.handleLogin)
 	h.mux.HandleFunc("POST /api/auth/refresh", h.handleRefresh)
 	h.mux.HandleFunc("GET /api/auth/userinfo", h.handleUserInfo)
+	// User self-service (authenticated by the user's own access token, any audience)
+	h.mux.HandleFunc("GET /api/user/apps", h.handleUserApps)
+	h.mux.HandleFunc("POST /api/user/logout-all", h.handleUserLogoutAll)
+	h.mux.HandleFunc("GET /api/user/preferences", h.handleGetUserPreferences)
+	h.mux.HandleFunc("PUT /api/user/preferences", h.handleSetUserPreferences)
 	h.mux.HandleFunc("POST /api/auth/impersonate", h.requireMasterAdmin(h.handleImpersonate))
 	h.mux.HandleFunc("GET /api/auth/negotiate", h.handleNegotiate)
 	// Diagnostic Kerberos/LDAP test pages — unauthenticated and perform live
