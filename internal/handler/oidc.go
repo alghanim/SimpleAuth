@@ -167,11 +167,6 @@ func (h *Handler) requireConfidentialClient(r *http.Request) error {
 	return nil
 }
 
-// oidcClientID returns the client_id for OIDC claims.
-func (h *Handler) oidcClientID() string {
-	return "simpleauth"
-}
-
 // verifyPKCE validates a PKCE code_verifier against the stored code_challenge
 // (RFC 7636). S256 is preferred; "plain"/empty compares verbatim. Comparisons
 // are constant-time.
@@ -381,6 +376,10 @@ func (h *Handler) showOIDCLoginPage(w http.ResponseWriter, r *http.Request) {
 	ssoLink := ""
 	if ssoEnabled {
 		ssoLink = h.url("/login/sso") + "?oidc=1"
+		// Carry client_id so handleSSOLogin (auth.go) resolves the INITIATING app
+		// rather than falling back to the default app — otherwise the SPNEGO path
+		// mints a wrong-audience token or dead-ends on redirect validation.
+		ssoLink += "&client_id=" + url.QueryEscape(app.AppID)
 		if redirectURI != "" {
 			ssoLink += "&redirect_uri=" + url.QueryEscape(redirectURI)
 		}
@@ -396,8 +395,17 @@ func (h *Handler) showOIDCLoginPage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Only auto-redirect when SSO is enabled, there is no error, and we have not
+	// already tried — mirroring hosted_login.go. The __sso_attempted breaker is
+	// required now that ssoLink carries client_id: redirectToLoginError can
+	// resolve the initiating app and bounce the failure to ITS callback, so an RP
+	// that re-initiates authorize on error would otherwise loop.
 	autoSSO := false
-	if ssoEnabled && errorMsg == "" {
+	ssoAttempted := false
+	if c, err := r.Cookie("__sso_attempted"); err == nil && c.Value == "1" {
+		ssoAttempted = true
+	}
+	if ssoEnabled && errorMsg == "" && !ssoAttempted {
 		if rs := h.runtimeSettings.get(); rs != nil && rs.AutoSSO {
 			autoSSO = true
 		}
@@ -428,7 +436,10 @@ func (h *Handler) showOIDCLoginPage(w http.ResponseWriter, r *http.Request) {
 	h.setCSRFCookie(w, csrfToken)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, oidcLoginHTML, action, h.oidcClientID(), esc(redirectURI), esc(state), esc(nonce), esc(scope), esc(appName), errorHTML, ssoLink, ssoEnabledStr, autoSSOStr, ssoDelay, esc(codeChallenge), esc(codeChallengeMethod), esc(csrfToken))
+	// %[2]s is the RESOLVED app's id — never a hardcoded default. The POST branch
+	// re-resolves the app from this field, so stamping anything else binds the
+	// auth code (and every token it yields) to the wrong app.
+	fmt.Fprintf(w, oidcLoginHTML, action, esc(app.AppID), esc(redirectURI), esc(state), esc(nonce), esc(scope), esc(appName), errorHTML, ssoLink, ssoEnabledStr, autoSSOStr, ssoDelay, esc(codeChallenge), esc(codeChallengeMethod), esc(csrfToken))
 }
 
 // handleOIDCToken handles the OAuth2 token endpoint.
@@ -775,22 +786,18 @@ func (h *Handler) issueOIDCTokens(w http.ResponseWriter, r *http.Request, user *
 		ExpiresAt: time.Now().UTC().Add(h.cfg.RefreshTTL),
 		CreatedAt: time.Now().UTC(),
 	}
-	if app != nil {
-		rt.AppID = app.AppID
-		rt.Audience = appAudience(app)
-	}
+	rt.AppID = app.AppID
+	rt.Audience = appAudience(app)
 	if err := h.store.SaveRefreshToken(rt); err != nil {
 		oidcError(w, "server_error", "refresh token generation failed", http.StatusInternalServerError)
 		return
 	}
 
-	// ID token — audience/azp = the app (v2).
-	idClientID := h.oidcClientID()
-	idAud := idClientID
-	if app != nil {
-		idClientID = app.AppID
-		idAud = appAudience(app)
-	}
+	// ID token — audience/azp = the app (v2). app is always non-nil here:
+	// resolveApp never returns (nil, nil), and resolveTokenRoles above already
+	// dereferenced it.
+	idClientID := app.AppID
+	idAud := appAudience(app)
 	idClaims := auth.Claims{
 		Name:              user.DisplayName,
 		Email:             user.Email,
@@ -831,20 +838,18 @@ func (h *Handler) issueOIDCTokens(w http.ResponseWriter, r *http.Request, user *
 }
 
 // buildOIDCAccessClaims constructs Keycloak-compatible access token claims.
-// When app is non-nil the audience, azp, and resource_access key are the app
-// (v2 per-app authorization); otherwise the legacy single client_id is used.
+// The audience, azp, and resource_access key are always the app (v2 per-app
+// authorization); app is non-nil on every call path (resolveApp never returns
+// (nil, nil), and both callers run resolveTokenRoles, which dereferences it,
+// first).
 func (h *Handler) buildOIDCAccessClaims(user *store.User, roles, perms, groups []string, scope string, app *store.App) auth.Claims {
 	preferredUsername := user.Email
 	if preferredUsername == "" {
 		preferredUsername = user.DisplayName
 	}
 
-	clientID := h.oidcClientID()
-	aud := clientID
-	if app != nil {
-		clientID = app.AppID
-		aud = appAudience(app)
-	}
+	clientID := app.AppID
+	aud := appAudience(app)
 
 	claims := auth.Claims{
 		Name:              user.DisplayName,
@@ -969,8 +974,26 @@ func (h *Handler) handleOIDCIntrospect(w http.ResponseWriter, r *http.Request) {
 		"exp":        claims.ExpiresAt.Unix(),
 		"iat":        claims.IssuedAt.Unix(),
 		"token_type": "Bearer",
-		"client_id":  h.oidcClientID(),
 		"scope":      claims.Scope,
+	}
+	// client_id must describe the token's OWN app (RFC 7662 §2.2), not a hardcoded
+	// default. azp is set to app.AppID at mint time by buildOIDCAccessClaims, so
+	// every OIDC-minted access token carries it. Deliberately NO fallback to the
+	// audience: `aud` is a free-form audience string (often a URL) and is not a
+	// registered client_id, so reporting it would hand resource servers a value
+	// that can never match their client registry. Tokens minted by paths that do
+	// not set azp (v1 refresh, impersonation) simply omit the member.
+	if claims.Azp != "" {
+		resp["client_id"] = claims.Azp
+	}
+	// Keycloak encodes a single audience as a bare string, not a 1-element array;
+	// match it, since migrated RPs string-compare this field.
+	switch len(claims.Audience) {
+	case 0:
+	case 1:
+		resp["aud"] = claims.Audience[0]
+	default:
+		resp["aud"] = []string(claims.Audience)
 	}
 	if claims.PreferredUsername != "" {
 		resp["preferred_username"] = claims.PreferredUsername
