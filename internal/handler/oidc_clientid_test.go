@@ -191,6 +191,77 @@ func TestOIDCClientIDRoundTrip(t *testing.T) {
 	}
 }
 
+// TestOIDCLoginPageEscapesReflectedValues pins the html/template conversion: the
+// authorize page reflects several attacker-supplied values into three different
+// escaping contexts (HTML attribute, href URL, JS string literal). None may break
+// out. The `error` parameter is the one with real history — it is reflected into
+// the page body, and the .error div's presence is also read by the inline script.
+func TestOIDCLoginPageEscapesReflectedValues(t *testing.T) {
+	h, _ := testSetup(t)
+	adm := adminHeaders()
+
+	const realm = "test-issuer"
+	const authzPath = "/realms/" + realm + "/protocol/openid-connect/auth"
+	const cb = "https://shop3.example/cb"
+
+	w := doJSON(h, "POST", "/api/admin/apps", map[string]interface{}{
+		"app_id": "shop3", "audience": "shop3", "redirect_uris": []string{cb},
+	}, adm)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create app: %d %s", w.Code, w.Body.String())
+	}
+
+	// Every one of these lands in the rendered page. The payloads close an
+	// attribute, a script block, and a JS string respectively.
+	const attrBreak = `" onerror="alert(1)`
+	const tagBreak = `</script><script>alert(1)</script>`
+	q := url.Values{}
+	q.Set("client_id", "shop3")
+	q.Set("redirect_uri", cb)
+	q.Set("response_type", "code")
+	q.Set("state", attrBreak)
+	q.Set("nonce", tagBreak)
+	q.Set("scope", attrBreak)
+	q.Set("error", tagBreak)
+
+	req := httptest.NewRequest("GET", authzPath+"?"+q.Encode(), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("authorize page: %d %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+
+	// No payload may survive as live markup anywhere in the response.
+	for _, bad := range []string{
+		`</script><script>`,
+		`" onerror="`,
+		`onerror="alert(1)"`,
+	} {
+		if strings.Contains(body, bad) {
+			t.Fatalf("reflected value escaped its context: found %q in the rendered page", bad)
+		}
+	}
+
+	// The error banner must still render (the inline script keys off .error to
+	// decide whether to show the manual form), with the payload inert.
+	if !strings.Contains(body, `class="error"`) {
+		t.Fatal("error banner must render when ?error= is present")
+	}
+	if !strings.Contains(body, "&lt;/script&gt;") {
+		t.Fatal("reflected error must appear HTML-escaped, not raw")
+	}
+
+	// And with no ?error=, no banner — the conditional must actually be conditional.
+	q.Del("error")
+	req2 := httptest.NewRequest("GET", authzPath+"?"+q.Encode(), nil)
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+	if strings.Contains(rec2.Body.String(), `class="error"`) {
+		t.Fatal("error banner must not render when ?error= is absent")
+	}
+}
+
 // TestOIDCDefaultAppStillWorks guards the fix against over-correction: a request
 // that genuinely omits client_id must still resolve the default app and mint a
 // usable token, exactly as before.
