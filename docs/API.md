@@ -852,13 +852,23 @@ curl -k -X POST \
   "exp": 1700000000,
   "iat": 1699971200,
   "token_type": "Bearer",
-  "client_id": "simpleauth",
+  "client_id": "billing",
+  "aud": "billing",
   "scope": "openid profile email",
   "preferred_username": "jsmith@corp.local",
   "name": "John Smith",
   "email": "jsmith@corp.local"
 }
 ```
+
+`client_id` is the token's **own** app (its `azp` claim), not a fixed value —
+introspecting a token minted for app `billing` reports `billing`. It is **omitted**
+for tokens minted by paths that set no `azp` (v1 `/api/auth/refresh` and
+impersonation tokens), so consumers must treat it as optional rather than
+assuming it is always present.
+
+`aud` mirrors the token's audience, encoded the way Keycloak encodes it: a bare
+string for a single audience, an array only when there is more than one.
 
 **Response (200) -- inactive/invalid token:**
 

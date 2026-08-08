@@ -8,7 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"html"
+	"html/template"
 	"log"
 	"net"
 	"net/http"
@@ -165,11 +165,6 @@ func (h *Handler) requireConfidentialClient(r *http.Request) error {
 		return fmt.Errorf("invalid client credentials")
 	}
 	return nil
-}
-
-// oidcClientID returns the client_id for OIDC claims.
-func (h *Handler) oidcClientID() string {
-	return "simpleauth"
 }
 
 // verifyPKCE validates a PKCE code_verifier against the stored code_challenge
@@ -363,12 +358,6 @@ func (h *Handler) showOIDCLoginPage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	errorHTML := ""
-	if errorMsg != "" {
-		// Escape the reflected error to prevent reflected XSS (M9).
-		errorHTML = `<div class="error">` + html.EscapeString(errorMsg) + `</div>`
-	}
-
 	realm := h.cfg.JWTIssuer
 	action := h.cfg.BasePath + "/realms/" + realm + "/protocol/openid-connect/auth"
 
@@ -381,6 +370,10 @@ func (h *Handler) showOIDCLoginPage(w http.ResponseWriter, r *http.Request) {
 	ssoLink := ""
 	if ssoEnabled {
 		ssoLink = h.url("/login/sso") + "?oidc=1"
+		// Carry client_id so handleSSOLogin (auth.go) resolves the INITIATING app
+		// rather than falling back to the default app — otherwise the SPNEGO path
+		// mints a wrong-audience token or dead-ends on redirect validation.
+		ssoLink += "&client_id=" + url.QueryEscape(app.AppID)
 		if redirectURI != "" {
 			ssoLink += "&redirect_uri=" + url.QueryEscape(redirectURI)
 		}
@@ -396,8 +389,17 @@ func (h *Handler) showOIDCLoginPage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Only auto-redirect when SSO is enabled, there is no error, and we have not
+	// already tried — mirroring hosted_login.go. The __sso_attempted breaker is
+	// required now that ssoLink carries client_id: redirectToLoginError can
+	// resolve the initiating app and bounce the failure to ITS callback, so an RP
+	// that re-initiates authorize on error would otherwise loop.
 	autoSSO := false
-	if ssoEnabled && errorMsg == "" {
+	ssoAttempted := false
+	if c, err := r.Cookie("__sso_attempted"); err == nil && c.Value == "1" {
+		ssoAttempted = true
+	}
+	if ssoEnabled && errorMsg == "" && !ssoAttempted {
 		if rs := h.runtimeSettings.get(); rs != nil && rs.AutoSSO {
 			autoSSO = true
 		}
@@ -417,18 +419,36 @@ func (h *Handler) showOIDCLoginPage(w http.ResponseWriter, r *http.Request) {
 		ssoDelay = rs.AutoSSODelay
 	}
 
-	// Escape values reflected into HTML to prevent reflected XSS (M9). ssoLink
-	// is assembled from URL-escaped components above, so it is safe as-is.
-	esc := html.EscapeString
-
 	// CSRF: set a token cookie and embed it as a hidden field so the POST branch
 	// of handleOIDCAuthorize can reject cross-origin form submissions (login CSRF
 	// / session fixation, F30) — mirroring the hosted-login form.
 	csrfToken := generateCSRFToken()
 	h.setCSRFCookie(w, csrfToken)
 
+	// ClientID is the RESOLVED app's id — never a hardcoded default. The POST
+	// branch re-resolves the app from this field, so stamping anything else binds
+	// the auth code (and every token it yields) to the wrong app.
+	data := oidcLoginData{
+		Action:              action,
+		ClientID:            app.AppID,
+		RedirectURI:         redirectURI,
+		State:               state,
+		Nonce:               nonce,
+		Scope:               scope,
+		AppName:             appName,
+		ErrorMsg:            errorMsg,
+		SSOLink:             ssoLink,
+		SSOEnabled:          ssoEnabledStr,
+		AutoSSO:             autoSSOStr,
+		SSODelay:            ssoDelay,
+		CodeChallenge:       codeChallenge,
+		CodeChallengeMethod: codeChallengeMethod,
+		CSRFToken:           csrfToken,
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, oidcLoginHTML, action, h.oidcClientID(), esc(redirectURI), esc(state), esc(nonce), esc(scope), esc(appName), errorHTML, ssoLink, ssoEnabledStr, autoSSOStr, ssoDelay, esc(codeChallenge), esc(codeChallengeMethod), esc(csrfToken))
+	if err := oidcLoginTmpl.Execute(w, data); err != nil {
+		log.Printf("[oidc] render login page: %v", err)
+	}
 }
 
 // handleOIDCToken handles the OAuth2 token endpoint.
@@ -775,22 +795,18 @@ func (h *Handler) issueOIDCTokens(w http.ResponseWriter, r *http.Request, user *
 		ExpiresAt: time.Now().UTC().Add(h.cfg.RefreshTTL),
 		CreatedAt: time.Now().UTC(),
 	}
-	if app != nil {
-		rt.AppID = app.AppID
-		rt.Audience = appAudience(app)
-	}
+	rt.AppID = app.AppID
+	rt.Audience = appAudience(app)
 	if err := h.store.SaveRefreshToken(rt); err != nil {
 		oidcError(w, "server_error", "refresh token generation failed", http.StatusInternalServerError)
 		return
 	}
 
-	// ID token — audience/azp = the app (v2).
-	idClientID := h.oidcClientID()
-	idAud := idClientID
-	if app != nil {
-		idClientID = app.AppID
-		idAud = appAudience(app)
-	}
+	// ID token — audience/azp = the app (v2). app is always non-nil here:
+	// resolveApp never returns (nil, nil), and resolveTokenRoles above already
+	// dereferenced it.
+	idClientID := app.AppID
+	idAud := appAudience(app)
 	idClaims := auth.Claims{
 		Name:              user.DisplayName,
 		Email:             user.Email,
@@ -831,20 +847,18 @@ func (h *Handler) issueOIDCTokens(w http.ResponseWriter, r *http.Request, user *
 }
 
 // buildOIDCAccessClaims constructs Keycloak-compatible access token claims.
-// When app is non-nil the audience, azp, and resource_access key are the app
-// (v2 per-app authorization); otherwise the legacy single client_id is used.
+// The audience, azp, and resource_access key are always the app (v2 per-app
+// authorization); app is non-nil on every call path (resolveApp never returns
+// (nil, nil), and both callers run resolveTokenRoles, which dereferences it,
+// first).
 func (h *Handler) buildOIDCAccessClaims(user *store.User, roles, perms, groups []string, scope string, app *store.App) auth.Claims {
 	preferredUsername := user.Email
 	if preferredUsername == "" {
 		preferredUsername = user.DisplayName
 	}
 
-	clientID := h.oidcClientID()
-	aud := clientID
-	if app != nil {
-		clientID = app.AppID
-		aud = appAudience(app)
-	}
+	clientID := app.AppID
+	aud := appAudience(app)
 
 	claims := auth.Claims{
 		Name:              user.DisplayName,
@@ -969,8 +983,26 @@ func (h *Handler) handleOIDCIntrospect(w http.ResponseWriter, r *http.Request) {
 		"exp":        claims.ExpiresAt.Unix(),
 		"iat":        claims.IssuedAt.Unix(),
 		"token_type": "Bearer",
-		"client_id":  h.oidcClientID(),
 		"scope":      claims.Scope,
+	}
+	// client_id must describe the token's OWN app (RFC 7662 §2.2), not a hardcoded
+	// default. azp is set to app.AppID at mint time by buildOIDCAccessClaims, so
+	// every OIDC-minted access token carries it. Deliberately NO fallback to the
+	// audience: `aud` is a free-form audience string (often a URL) and is not a
+	// registered client_id, so reporting it would hand resource servers a value
+	// that can never match their client registry. Tokens minted by paths that do
+	// not set azp (v1 refresh, impersonation) simply omit the member.
+	if claims.Azp != "" {
+		resp["client_id"] = claims.Azp
+	}
+	// Keycloak encodes a single audience as a bare string, not a 1-element array;
+	// match it, since migrated RPs string-compare this field.
+	switch len(claims.Audience) {
+	case 0:
+	case 1:
+		resp["aud"] = claims.Audience[0]
+	default:
+		resp["aud"] = []string(claims.Audience)
 	}
 	if claims.PreferredUsername != "" {
 		resp["preferred_username"] = claims.PreferredUsername
@@ -1068,12 +1100,32 @@ func oidcError(w http.ResponseWriter, errorCode, description string, status int)
 	}, status)
 }
 
-// OIDC login page template
-// oidcLoginHTML format args:
-// %[1]s = form action, %[2]s = client_id, %[3]s = redirect_uri, %[4]s = state,
-// %[5]s = nonce, %[6]s = scope, %[7]s = appName, %[8]s = errorHTML,
-// %[9]s = ssoLink, %[10]s = ssoEnabled ("1"/""), %[11]s = autoSSO ("1"/""), %[12]d = delay,
-// %[13]s = code_challenge, %[14]s = code_challenge_method, %[15]s = csrf token
+// OIDC login page template. Rendered with html/template, NOT fmt.Fprintf: every
+// interpolated value here is attacker-influenced (client_id, redirect_uri, state,
+// nonce, scope, code_challenge) and lands in three different escaping contexts —
+// HTML attribute, href URL, and a JS string literal. html/template applies the
+// correct escaper per context automatically; hand-rolled html.EscapeString does
+// not distinguish them.
+type oidcLoginData struct {
+	Action              string
+	ClientID            string
+	RedirectURI         string
+	State               string
+	Nonce               string
+	Scope               string
+	AppName             string
+	ErrorMsg            string
+	SSOLink             string
+	SSOEnabled          string
+	AutoSSO             string
+	SSODelay            int
+	CodeChallenge       string
+	CodeChallengeMethod string
+	CSRFToken           string
+}
+
+var oidcLoginTmpl = template.Must(template.New("oidcLogin").Parse(oidcLoginHTML))
+
 const oidcLoginHTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1103,13 +1155,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .gold-bar{height:3px;background:linear-gradient(90deg,var(--gold-light),var(--gold-dark));border-radius:999px;margin-bottom:24px}
 .error{background:var(--error-bg);color:var(--error-text);padding:12px 16px;border-radius:8px;font-size:0.875rem;margin-bottom:16px}
 label{display:block;font-size:0.875rem;font-weight:600;margin-bottom:8px}
-input[type=text],input[type=password]{width:100%%;padding:12px 16px;background:var(--input-bg);border:1px solid var(--input-border);border-radius:12px;font-size:0.875rem;font-family:inherit;color:var(--text);margin-bottom:16px}
+input[type=text],input[type=password]{width:100%;padding:12px 16px;background:var(--input-bg);border:1px solid var(--input-border);border-radius:12px;font-size:0.875rem;font-family:inherit;color:var(--text);margin-bottom:16px}
 input:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 3px rgba(143,106,42,0.2)}
-.btn-primary{width:100%%;padding:14px;background:var(--burgundy);color:#fff;border:none;border-radius:8px;font-size:0.95rem;font-weight:600;cursor:pointer;font-family:inherit;text-align:center;text-decoration:none;display:block}
+.btn-primary{width:100%;padding:14px;background:var(--burgundy);color:#fff;border:none;border-radius:8px;font-size:0.95rem;font-weight:600;cursor:pointer;font-family:inherit;text-align:center;text-decoration:none;display:block}
 .btn-primary:hover{background:var(--burgundy-hover)}
-.btn-submit{width:100%%;padding:12px;background:var(--burgundy);color:#fff;border:none;border-radius:8px;font-size:0.875rem;font-weight:600;cursor:pointer;font-family:inherit}
+.btn-submit{width:100%;padding:12px;background:var(--burgundy);color:#fff;border:none;border-radius:8px;font-size:0.875rem;font-weight:600;cursor:pointer;font-family:inherit}
 .btn-submit:hover{background:var(--burgundy-hover)}
-.manual-toggle{display:block;width:100%%;text-align:center;padding:10px;color:var(--muted);font-size:0.8rem;cursor:pointer;border:none;background:none;margin-top:16px;font-family:inherit}
+.manual-toggle{display:block;width:100%;text-align:center;padding:10px;color:var(--muted);font-size:0.8rem;cursor:pointer;border:none;background:none;margin-top:16px;font-family:inherit}
 .manual-toggle:hover{color:var(--text)}
 .manual-form{display:none;margin-top:16px;padding-top:16px;border-top:1px solid var(--border)}
 .manual-form.show{display:block}
@@ -1119,7 +1171,7 @@ input:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 3px rgba(143,
 .auto-sso-ring svg{transform:rotate(-90deg)}
 .auto-sso-ring circle.track{fill:none;stroke:var(--border);stroke-width:3}
 .auto-sso-ring circle.progress{fill:none;stroke:var(--burgundy);stroke-width:3;stroke-linecap:round;stroke-dasharray:175;stroke-dashoffset:175;transition:stroke-dashoffset 0.3s ease}
-.auto-sso-ring .countdown{position:absolute;top:50%%;left:50%%;transform:translate(-50%%,-50%%);font-size:1.25rem;font-weight:700;color:var(--text)}
+.auto-sso-ring .countdown{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:1.25rem;font-weight:700;color:var(--text)}
 .auto-sso p{color:var(--muted);font-size:0.9rem;margin-bottom:8px}
 .auto-sso .cancel{color:var(--burgundy);font-size:0.75rem;cursor:pointer;border:none;background:none;font-family:inherit;opacity:0.7;transition:opacity 0.2s}
 .auto-sso .cancel:hover{opacity:1}
@@ -1129,9 +1181,9 @@ input:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 3px rgba(143,
 <div class="card">
   <div class="brand"><h1>SimpleAuth</h1><p>Sign in to continue</p></div>
   <div class="gold-bar"></div>
-  %[8]s
+  {{if .ErrorMsg}}<div class="error">{{.ErrorMsg}}</div>{{end}}
   <div id="sso-section" style="display:none">
-    <a href="%[9]s" class="btn-primary" id="sso-btn">Sign in with Single Sign-On</a>
+    <a href="{{.SSOLink}}" class="btn-primary" id="sso-btn">Sign in with Single Sign-On</a>
     <button class="manual-toggle" onclick="document.getElementById('manual-form').classList.add('show');this.style.display='none'">
       Or sign in with username and password
     </button>
@@ -1150,16 +1202,16 @@ input:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 3px rgba(143,
     </div>
   </div>
   <div id="manual-form" class="manual-form">
-    <form method="POST" action="%[1]s">
-      <input type="hidden" name="client_id" value="%[2]s">
-      <input type="hidden" name="redirect_uri" value="%[3]s">
-      <input type="hidden" name="state" value="%[4]s">
-      <input type="hidden" name="nonce" value="%[5]s">
-      <input type="hidden" name="scope" value="%[6]s">
+    <form method="POST" action="{{.Action}}">
+      <input type="hidden" name="client_id" value="{{.ClientID}}">
+      <input type="hidden" name="redirect_uri" value="{{.RedirectURI}}">
+      <input type="hidden" name="state" value="{{.State}}">
+      <input type="hidden" name="nonce" value="{{.Nonce}}">
+      <input type="hidden" name="scope" value="{{.Scope}}">
       <input type="hidden" name="response_type" value="code">
-      <input type="hidden" name="code_challenge" value="%[13]s">
-      <input type="hidden" name="code_challenge_method" value="%[14]s">
-      <input type="hidden" name="_csrf" value="%[15]s">
+      <input type="hidden" name="code_challenge" value="{{.CodeChallenge}}">
+      <input type="hidden" name="code_challenge_method" value="{{.CodeChallengeMethod}}">
+      <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
       <label>Username</label>
       <input type="text" name="username" placeholder="Enter your username" autofocus required>
       <label>Password</label>
@@ -1167,14 +1219,14 @@ input:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 3px rgba(143,
       <button type="submit" class="btn-submit">Sign In</button>
     </form>
   </div>
-  <div class="app-name">Signing into %[7]s</div>
+  <div class="app-name">Signing into {{.AppName}}</div>
 </div>
 <script>
 (function(){
-  var ssoEnabled = "%[10]s" === "1";
-  var autoSSO = "%[11]s" === "1";
-  var ssoLink = "%[9]s";
-  var ssoDelay = %[12]d;
+  var ssoEnabled = "{{.SSOEnabled}}" === "1";
+  var autoSSO = "{{.AutoSSO}}" === "1";
+  var ssoLink = "{{.SSOLink}}";
+  var ssoDelay = {{.SSODelay}};
   var hasError = document.querySelector('.error') !== null;
   var manualForm = document.getElementById('manual-form');
 
