@@ -118,7 +118,7 @@ func (h *Handler) resolveSessionCookie(w http.ResponseWriter, r *http.Request) s
 
 	// Verify user still exists and is not disabled
 	user, err := h.store.ResolveUser(s.UserGUID)
-	if err != nil || user == nil || user.Disabled {
+	if err != nil || user == nil || user.Disabled || h.directoryAccountDisabled(user) {
 		h.store.DeleteSession(s.ID)
 		h.clearSessionCookie(w)
 		return ""
@@ -156,22 +156,35 @@ func (h *Handler) resolveSessionCookie(w http.ResponseWriter, r *http.Request) s
 // clearSessionCookie removes the SSO session cookie from the browser.
 // Also deletes the session row from the store if cookie is present.
 func (h *Handler) clearSessionCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
-		Value:    "",
-		Path:     h.sessionCookiePath(),
-		HttpOnly: true,
-		Secure:   !h.cfg.TLSDisabled,
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   -1,
-	})
+	paths := []string{h.sessionCookiePath()}
+	// Before v2 the cookie was always set on Path=/. Behind a base path, also
+	// expire that legacy cookie, or it outlives logout and keeps pointing at a
+	// live session.
+	if paths[0] != "/" {
+		paths = append(paths, "/")
+	}
+	for _, p := range paths {
+		http.SetCookie(w, &http.Cookie{
+			Name:     sessionCookieName,
+			Value:    "",
+			Path:     p,
+			HttpOnly: true,
+			Secure:   !h.cfg.TLSDisabled,
+			SameSite: http.SameSiteLaxMode,
+			MaxAge:   -1,
+		})
+	}
 }
 
 // deleteCurrentSession deletes the session row pointed at by the cookie,
 // then clears the cookie. Used on explicit logout.
 func (h *Handler) deleteCurrentSession(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie(sessionCookieName); err == nil && c.Value != "" {
-		h.store.DeleteSession(c.Value)
+	// The browser may send several cookies with this name (the current BasePath
+	// one plus a legacy Path=/ one), so delete every session they reference.
+	for _, c := range r.Cookies() {
+		if c.Name == sessionCookieName && c.Value != "" {
+			h.store.DeleteSession(c.Value)
+		}
 	}
 	h.clearSessionCookie(w)
 }

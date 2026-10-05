@@ -41,6 +41,10 @@ type Handler struct {
 	// limiter-apply so concurrent updates cannot leave the store, the cache, and
 	// the live rate limiter with different states.
 	settingsMu sync.Mutex
+	// dirChecked caches each user's last successful AD account-status check
+	// (guid -> time.Time); persisted as config value "dircheck:<guid>" so the
+	// AD-outage grace window survives restarts.
+	dirChecked sync.Map
 }
 
 func New(cfg *config.Config, s store.Store, jwtMgr *auth.JWTManager, uiFS fs.FS, version string) *Handler {

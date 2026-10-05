@@ -76,6 +76,10 @@ type Config struct {
 	SessionSSOIdleTTL time.Duration `yaml:"session_sso_idle_ttl"`
 	SessionSSOMaxTTL  time.Duration `yaml:"session_sso_max_ttl"`
 
+	// AD outage policy: seeds the runtime setting on first start only.
+	DirectoryOutagePolicy string        `yaml:"directory_outage_policy"` // grace | block | allow
+	DirectoryOutageGrace  time.Duration `yaml:"directory_outage_grace"`
+
 	// Database
 	PostgresURL string `yaml:"postgres_url"`
 }
@@ -122,6 +126,9 @@ type configFile struct {
 	SessionSSOIdleTTL string `yaml:"session_sso_idle_ttl"`
 	SessionSSOMaxTTL  string `yaml:"session_sso_max_ttl"`
 
+	DirectoryOutagePolicy string `yaml:"directory_outage_policy"`
+	DirectoryOutageGrace  string `yaml:"directory_outage_grace"`
+
 	EnableTestEndpoints bool `yaml:"enable_test_endpoints"`
 }
 
@@ -150,6 +157,8 @@ func Load() *Config {
 		AccountLockoutDuration: 30 * time.Minute,
 		SessionSSOIdleTTL:      8 * time.Hour,
 		SessionSSOMaxTTL:       720 * time.Hour, // 30 days
+		DirectoryOutagePolicy:  "grace",
+		DirectoryOutageGrace:   10 * time.Hour, // AD default ticket lifetime
 	}
 
 	// Try to load config file
@@ -528,6 +537,14 @@ func loadConfigFile(cfg *Config) {
 			cfg.SessionSSOMaxTTL = d
 		}
 	}
+	if fc.DirectoryOutagePolicy != "" {
+		cfg.DirectoryOutagePolicy = fc.DirectoryOutagePolicy
+	}
+	if fc.DirectoryOutageGrace != "" {
+		if d, err := time.ParseDuration(fc.DirectoryOutageGrace); err == nil {
+			cfg.DirectoryOutageGrace = d
+		}
+	}
 }
 
 func applyEnvOverrides(cfg *Config) {
@@ -678,6 +695,14 @@ func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("AUTH_SESSION_SSO_MAX_TTL"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			cfg.SessionSSOMaxTTL = d
+		}
+	}
+	if v := os.Getenv("AUTH_DIRECTORY_OUTAGE_POLICY"); v != "" {
+		cfg.DirectoryOutagePolicy = v
+	}
+	if v := os.Getenv("AUTH_DIRECTORY_OUTAGE_GRACE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.DirectoryOutageGrace = d
 		}
 	}
 }

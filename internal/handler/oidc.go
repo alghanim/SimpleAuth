@@ -780,7 +780,7 @@ func (h *Handler) handleOIDCTokenRefresh(w http.ResponseWriter, r *http.Request)
 		oidcError(w, "invalid_grant", "user not found", http.StatusUnauthorized)
 		return
 	}
-	if user.Disabled {
+	if user.Disabled || h.directoryAccountDisabled(user) {
 		oidcError(w, "invalid_grant", "account disabled", http.StatusUnauthorized)
 		return
 	}

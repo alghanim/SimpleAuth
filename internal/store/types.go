@@ -244,5 +244,9 @@ type RuntimeSettings struct {
 	EnableSessionSSO         bool     `json:"enable_session_sso"`
 	SessionSSOIdleHours      int      `json:"session_sso_idle_hours"` // default 8
 	SessionSSOMaxHours       int      `json:"session_sso_max_hours"`  // default 720 (30 days)
-	Version                  int      `json:"version"`                // optimistic-concurrency token: PUT echoes it, the server bumps it; 0 = client sent none (legacy last-writer-wins)
+	// What to do with directory (AD) users when the AD account-status check
+	// can't reach LDAP: "grace" (default; empty means grace), "block", or "allow".
+	DirectoryOutagePolicy     string `json:"directory_outage_policy"`
+	DirectoryOutageGraceHours int    `json:"directory_outage_grace_hours"` // grace window; default 10 (AD default ticket lifetime)
+	Version                   int    `json:"version"`                      // optimistic-concurrency token: PUT echoes it, the server bumps it; 0 = client sent none (legacy last-writer-wins)
 }
