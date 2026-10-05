@@ -34,7 +34,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@v1.7.0 # pinned: v1.8.0+ needs Go 1.26; bump with go.mod
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.8.0 # pinned; v1.8.0 needs Go 1.26 — bump together with go.mod
 
       - name: Scan server module
         run: govulncheck ./...
