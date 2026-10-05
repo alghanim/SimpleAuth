@@ -157,6 +157,7 @@ A developer's whole integration becomes: get an `app_id`/`app_secret` → `boots
 - Optional shared SSO session cookie (log in once, skip the login page across apps)
 - Auto-SSO with a countdown + cancel
 - LDAP bind login for non-domain users
+- **AD offboarding enforced** — users disabled, expired, or deleted in AD lose access at their next login, refresh, or SSO, even with a still-valid Kerberos ticket (configurable behavior when AD is unreachable)
 - Local passwords (bcrypt, policy, history)
 - Account lockout after repeated failures
 - Hosted login page + standard OIDC
@@ -205,6 +206,7 @@ SimpleAuth guards the front door, so security isn't a feature — it's the produ
 - **A public, living audit trail.** [`SECURITY-AUDIT.md`](SECURITY-AUDIT.md) logs every security review, finding, and fix — dated, with stable IDs, by **different AI models and humans** over time. Nothing is swept under the rug; even `WONTFIX` decisions are written down with rationale. It's unusual to publish your own audit log. We think a project that protects logins should.
 - **Sane defaults that fail closed.** Redirect URIs are a strict allowlist (empty = reject all). The confidential OIDC grants (`password`, `client_credentials`) and token introspection are **disabled unless you set `AUTH_CLIENT_SECRET`**. Trusted proxies default to *trust none*.
 - **Modern token hygiene.** RS256 only (no alg-confusion), JWKS with a stable key id, single-use refresh tokens with replay detection, an access-revocation kill switch, and authenticator-verified Kerberos with a replay cache and clock-skew enforcement.
+- **AD offboarding actually offboards.** Disabling someone in AD only stops *new* Kerberos tickets. SimpleAuth checks `userAccountControl` / `accountExpires` in AD on every login, token refresh, and SSO-cookie reuse, so a disabled user is out within one access-token lifetime (15 min by default). You choose what happens if AD is unreachable: keep users confirmed within the ticket lifetime (default), block everyone, or allow everyone.
 - **Defense in depth.** bcrypt password hashing with a configurable policy and history, account lockout, per-IP rate limiting, CSRF tokens, and security headers across responses.
 
 Found something? Please **open a security advisory** (or a private report) rather than a public issue — see [Contributing](#-contributing). Then add it to the audit log; that's exactly what it's for.
@@ -315,6 +317,8 @@ Everything else — password policy, lockout, rate limiting, audit retention —
 2. **Run it** on any domain-joined machine — it creates the account, registers SPNs, and exports a config file. No `ktpass`.
 3. **Paste the config back** in the UI. SimpleAuth builds the keytab in memory and enables SSO immediately.
 
+Users disabled, expired, or deleted in AD lose access automatically — see [Disabled, Expired, and Deleted AD Accounts](docs/ACTIVE-DIRECTORY.md#disabled-expired-and-deleted-ad-accounts).
+
 Full guide + troubleshooting: [docs/ACTIVE-DIRECTORY.md](docs/ACTIVE-DIRECTORY.md).
 
 ## 🧱 Embed it in your Go app
@@ -350,6 +354,7 @@ Your app and its auth server, one process, one deploy. See [docs/ARCHITECTURE.md
 | [Reverse Proxy](docs/REVERSE-PROXY.md) | nginx, Traefik, Caddy, HAProxy |
 | [SDK Guide](docs/SDK-GUIDE.md) | Client SDK usage |
 | [Security Audit Log](SECURITY-AUDIT.md) | Every review, finding, and fix |
+| [Changelog](CHANGELOG.md) | What changed in each release, upgrade notes |
 
 ## License
 

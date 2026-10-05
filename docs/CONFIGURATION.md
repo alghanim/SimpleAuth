@@ -59,6 +59,8 @@ These settings can be changed at any time from the admin UI (Settings page) or v
 | Enable shared SSO session cookie | Settings → Single Sign-On |
 | Session idle timeout (hours) | Settings → Single Sign-On |
 | Session absolute max (hours) | Settings → Single Sign-On |
+| When AD is unreachable (AD outage policy) | Settings → AD Outage Behavior |
+| Grace period (hours) | Settings → AD Outage Behavior |
 | Deployment Name | Settings → General |
 
 ### Priority Order
@@ -141,6 +143,8 @@ SimpleAuth looks for a config file in this order:
 | `enable_session_sso` | `AUTH_ENABLE_SESSION_SSO` | `false` | Enables a shared SSO session cookie. After a successful login, SimpleAuth sets an HttpOnly cookie on its own host. On subsequent redirects from any app, the login page is skipped and fresh tokens are issued immediately. Works across different subdomains — apps never see the cookie; only SimpleAuth does. See [Session SSO](#shared-sso-session-cookie) below. |
 | `session_sso_idle_ttl` | `AUTH_SESSION_SSO_IDLE_TTL` | `8h` | Session dies after this duration of inactivity. Bumped every time a user's browser hits SimpleAuth (each redirect from an app counts). Go duration format. |
 | `session_sso_max_ttl` | `AUTH_SESSION_SSO_MAX_TTL` | `720h` | Absolute maximum lifetime regardless of activity. After this, the user must re-authenticate. Default is 30 days. Go duration format. |
+| `directory_outage_policy` | `AUTH_DIRECTORY_OUTAGE_POLICY` | `grace` | What happens to Active Directory (LDAP) users when SimpleAuth cannot reach AD to check whether their account is still active. Exactly one of: `grace` (default, recommended), `block`, `allow` (not recommended). **Seeds the runtime setting on first start only** — after that, change it in the admin UI (Settings → AD Outage Behavior) or via `PUT /api/admin/settings` field `directory_outage_policy`. See [ACTIVE-DIRECTORY.md → Disabled, Expired, and Deleted AD Accounts](ACTIVE-DIRECTORY.md#disabled-expired-and-deleted-ad-accounts). |
+| `directory_outage_grace` | `AUTH_DIRECTORY_OUTAGE_GRACE` | `10h` | Only used when `directory_outage_policy` is `grace`. How long after AD last confirmed a user's account was active that user keeps access during an AD outage. Go duration format, whole hours (e.g. `10h`, `24h`). Minimum `1h`, maximum `168h`. **Seeds the runtime setting on first start only** — the runtime field is `directory_outage_grace_hours` (integer hours). |
 | `client_secret` | `AUTH_CLIENT_SECRET` | (none) | When set, **enables** the confidential OIDC flows — the `password` and `client_credentials` grants and token introspection — and requires this value as `client_secret` (post body or HTTP Basic). Leave empty (default) to keep those flows **disabled**. The public `authorization_code` (with PKCE) and `refresh_token` flows never need it. |
 | `enable_test_endpoints` | `AUTH_ENABLE_TEST_ENDPOINTS` | `false` | Exposes the diagnostic `/test-negotiate` Kerberos/LDAP pages. They are unauthenticated and perform live LDAP binds (a password oracle), so keep them off in production — enable only for troubleshooting. |
 
@@ -556,3 +560,11 @@ Combined, this means an admin can fully sign a user out of every app in under a 
 - Single-app deployments with only one redirect URI — the login page is shown exactly once per access-token window; the cookie adds complexity without benefit.
 - Kiosks / shared devices where each user must re-authenticate. If you do enable it on kiosks, set `session_sso_idle_ttl` to something aggressive like `15m`.
 - Deployments where `/logout` is not called reliably (e.g. apps that only clear local tokens). The cookie survives client-side logout unless SimpleAuth's logout endpoint is hit.
+
+---
+
+## AD Account Status and Outage Behavior
+
+From v2.3.0, SimpleAuth checks in Active Directory whether a directory user's account is still active (not disabled, not expired, not deleted) at every login, token refresh, and SSO-cookie reuse. The runtime settings `directory_outage_policy` (`grace` default / `block` / `allow`) and `directory_outage_grace_hours` (default `10`) decide what happens when AD cannot be reached.
+
+Full reference, including exact behavior, API examples, and troubleshooting: [ACTIVE-DIRECTORY.md → Disabled, Expired, and Deleted AD Accounts](ACTIVE-DIRECTORY.md#disabled-expired-and-deleted-ad-accounts).
