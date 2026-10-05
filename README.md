@@ -355,6 +355,7 @@ Your app and its auth server, one process, one deploy. See [docs/ARCHITECTURE.md
 | [SDK Guide](docs/SDK-GUIDE.md) | Client SDK usage |
 | [Security Audit Log](SECURITY-AUDIT.md) | Every review, finding, and fix |
 | [Changelog](CHANGELOG.md) | What changed in each release, upgrade notes |
+| [Maintenance](docs/MAINTENANCE.md) | Monthly dependency + toolchain checklist (no bots) |
 
 ## License
 
