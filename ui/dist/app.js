@@ -1717,6 +1717,32 @@ function SettingsPage() {
     </div>
 
     <div class="card" style="margin-top: 16px;">
+      <div class="card-header"><h3>AD Outage Behavior</h3></div>
+      <div class="card-body">
+        <p style="font-size: 0.75rem; color: var(--muted); margin-top: 0;">SimpleAuth checks Active Directory on every login, token refresh, and SSO session reuse so users disabled, expired, or deleted in AD lose access. This setting decides what happens to AD users when AD (LDAP) cannot be reached. Local users are never affected.</p>
+        <div style="margin-bottom: 12px;">
+          <label class="form-label">When AD is unreachable</label>
+          <select class="form-input" value=${settings.directory_outage_policy || 'grace'}
+            onChange=${e => setSettings({...settings, directory_outage_policy: e.target.value})}>
+            <option value="grace">Stay logged in during ticket lifetime (default, recommended)</option>
+            <option value="block">Block users (most secure)</option>
+            <option value="allow">Keep allowing everyone (least secure, not recommended)</option>
+          </select>
+        </div>
+        ${(settings.directory_outage_policy || 'grace') === 'grace' && html`
+          ${field('Grace period (hours)', 'directory_outage_grace_hours', 'number')}
+          <p style="font-size: 0.75rem; color: var(--muted); margin-top: -8px;">Users whose AD account was confirmed active within this many hours keep access during the outage; everyone else is blocked. Default: 10 (the default AD Kerberos ticket lifetime). Max: 168.</p>
+        `}
+        ${settings.directory_outage_policy === 'block' && html`
+          <p style="font-size: 0.75rem; color: var(--muted);">Every AD user is blocked until AD is reachable again, including users who are already logged in (at their next token refresh).</p>
+        `}
+        ${settings.directory_outage_policy === 'allow' && html`
+          <p style="font-size: 0.75rem; color: var(--status-error-text);">Warning: while AD is down, users disabled in AD can still log in and refresh tokens (refresh tokens last up to 30 days by default).</p>
+        `}
+      </div>
+    </div>
+
+    <div class="card" style="margin-top: 16px;">
       <div class="card-header"><h3>Audit Log</h3></div>
       <div class="card-body">
         ${field('Retention (days)', 'audit_retention_days', 'number')}

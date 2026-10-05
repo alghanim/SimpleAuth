@@ -189,6 +189,14 @@ curl -k -X POST https://auth.example.com/sauth/api/auth/refresh \
 {"error": "token reuse detected, all sessions revoked"}
 ```
 
+**Error response (403 -- account disabled):** the user is disabled in SimpleAuth, **or** (v2.3.0+) the user's Active Directory account is disabled, expired, or deleted, **or** AD is unreachable and the admin's AD outage policy denies the user. Your app must stop refreshing and send the user back to login. See [ACTIVE-DIRECTORY.md → Disabled, Expired, and Deleted AD Accounts](ACTIVE-DIRECTORY.md#disabled-expired-and-deleted-ad-accounts).
+
+```json
+{"error": "account disabled"}
+```
+
+> **Audience on refresh (v2.3.0+):** the new access token's `aud` is the app's **current** audience (Admin UI → Apps → audience, default = `app_id`), not the audience of the original login. If an admin changes an app's audience, existing sessions pick up the new value at their next refresh.
+
 > **Security note:** If a refresh token is reused (replayed), SimpleAuth revokes the entire token family, invalidating all sessions for that login. This protects against token theft.
 
 ---
@@ -295,6 +303,12 @@ curl -k --negotiate -u : \
 **Error response (401):**
 
 Returns `WWW-Authenticate: Negotiate` header (prompts browser to send Kerberos ticket).
+
+**Error response (403 -- account disabled):** the user is disabled in SimpleAuth, or (v2.3.0+) their Active Directory account is disabled, expired, or deleted. A valid Kerberos ticket alone is **not** enough: AD keeps honoring already-issued tickets for up to 10 hours after a disable, so SimpleAuth checks the account in AD on every call. See [ACTIVE-DIRECTORY.md → Disabled, Expired, and Deleted AD Accounts](ACTIVE-DIRECTORY.md#disabled-expired-and-deleted-ad-accounts).
+
+```json
+{"error": "account disabled"}
+```
 
 ---
 
@@ -500,6 +514,8 @@ This is the **recommended logout path** for apps using auto-SSO (`AUTH_AUTO_SSO=
 **Auth:** None (Kerberos SPNEGO)
 
 SSO login endpoint for the hosted login flow. Attempts Kerberos/SPNEGO authentication. On success, redirects to `redirect_uri` (or `/account`) with tokens in the URL fragment. On failure, redirects back to `/login` with an error message instead of hanging.
+
+From v2.3.0 the user's Active Directory account is checked on every SSO login. If it is disabled, expired, or deleted in AD, the user is redirected back to `/login` with the error "Account disabled", even if the browser still holds a valid Kerberos ticket. See [ACTIVE-DIRECTORY.md → Disabled, Expired, and Deleted AD Accounts](ACTIVE-DIRECTORY.md#disabled-expired-and-deleted-ad-accounts).
 
 **Query parameters:**
 - `redirect_uri` -- Where to redirect after successful SSO login
@@ -785,6 +801,15 @@ curl -k -X POST \
 ```
 
 Error codes: `invalid_request`, `invalid_client`, `invalid_grant`, `unsupported_grant_type`, `server_error`
+
+**Refresh denied because the account is disabled (HTTP 401):** returned for `grant_type=refresh_token` when the user is disabled in SimpleAuth, or (v2.3.0+) their Active Directory account is disabled, expired, or deleted, or AD is unreachable and the admin's AD outage policy denies the user. Stop refreshing and send the user to login. See [ACTIVE-DIRECTORY.md → Disabled, Expired, and Deleted AD Accounts](ACTIVE-DIRECTORY.md#disabled-expired-and-deleted-ad-accounts).
+
+```json
+{
+  "error": "invalid_grant",
+  "error_description": "account disabled"
+}
+```
 
 ---
 
@@ -2238,6 +2263,8 @@ curl -k -H "Authorization: Bearer ADMIN_KEY" \
   "enable_session_sso": false,
   "session_sso_idle_hours": 8,
   "session_sso_max_hours": 720,
+  "directory_outage_policy": "grace",
+  "directory_outage_grace_hours": 10,
   "version": 4
 }
 ```
@@ -2266,10 +2293,19 @@ security-relevant zeroes are clamped server-side rather than trusted:
   1000000000 / 86400. The response echoes the values actually applied.
 - Rate limiting is only ever turned off by the explicit boolean
   `rate_limit_disabled: true` — an omitted field leaves the limiter ON.
+- `directory_outage_policy` must be exactly `"grace"`, `"block"`, or
+  `"allow"` (case-insensitive); any other value is rejected (400). Omitted or
+  `""` means `"grace"`. It decides what happens to Active Directory users when
+  AD cannot be reached — see [ACTIVE-DIRECTORY.md → Disabled, Expired, and
+  Deleted AD Accounts](ACTIVE-DIRECTORY.md#disabled-expired-and-deleted-ad-accounts).
+- `directory_outage_grace_hours` (integer hours, used only with `"grace"`):
+  omitted or less than 1 becomes `10`; more than 168 is capped at `168`.
 
 Rate-limit changes (including the toggle) take effect **immediately** on the
 live limiter; no restart is needed. Toggle/limit/window changes are audited as
-`rate_limit_changed` with old and new values.
+`rate_limit_changed` with old and new values. AD outage policy changes also
+apply immediately and are audited as `directory_outage_policy_changed` with old
+and new values.
 
 **Concurrency:** the document carries a `version` token. If the `PUT` echoes a
 `version` (the Admin UI always does) that no longer matches the server's, the
@@ -2296,6 +2332,8 @@ curl -k -X PUT https://auth.example.com/sauth/api/admin/settings \
     "rate_limit_window_s": 60,
     "rate_limit_disabled": false,
     "audit_retention_days": 180,
+    "directory_outage_policy": "grace",
+    "directory_outage_grace_hours": 10,
     "version": 4
   }'
 ```
@@ -2307,6 +2345,12 @@ as `GET`, with `version` bumped).
 
 ```json
 {"error": "unauthorized"}
+```
+
+**Error response (400):**
+
+```json
+{"error": "directory_outage_policy must be one of: grace, block, allow"}
 ```
 
 **Error response (409):**

@@ -232,6 +232,12 @@ func (h *Handler) authenticateUser(username, password string, app *store.App) (s
 	if finalUser.Disabled {
 		return "", nil, fmt.Errorf("account disabled")
 	}
+	// A local password on a directory identity must not outlive the AD account.
+	// (The LDAP step already rejected disabled accounts, so only re-check when the
+	// local hash matched.)
+	if ldapResult == nil && h.directoryAccountDisabled(finalUser) {
+		return "", nil, fmt.Errorf("account disabled")
+	}
 
 	// Clear failed login attempts on successful auth
 	if finalUser.FailedLoginAttempts > 0 {
@@ -243,6 +249,7 @@ func (h *Handler) authenticateUser(username, password string, app *store.App) (s
 	// Sync profile from LDAP on every successful LDAP login
 	if ldapResult != nil {
 		h.syncUserFromLDAP(finalUser, ldapResult)
+		h.recordDirectoryCheck(finalUser.GUID) // AD just confirmed the account is active
 	}
 
 	return finalUser.GUID, ldapGroups, nil
@@ -441,8 +448,9 @@ func (h *Handler) issueTokenPair(user *store.User, roles []string, perms []strin
 // returns. It exists because a local password hash on a directory identity is a
 // permanent SHADOW credential: authenticateUser resolves the "local" mapping
 // FIRST ("local users always take priority") and nothing in SimpleAuth mirrors AD
-// account state — there is no userAccountControl read anywhere — so such a hash
-// keeps working after the AD account is disabled or the employee is terminated,
+// account state on this path by itself — so such a hash would keep working after
+// the AD account is disabled or the employee is terminated (authenticateUser now
+// re-checks AD via directoryAccountDisabled, but only while LDAP is reachable),
 // while the victim's AD password still works (a failed local check falls through
 // to the LDAP step) so nothing looks wrong (SA-7).
 //
@@ -491,6 +499,116 @@ func (h *Handler) isDirectoryBacked(user *store.User) bool {
 		}
 	}
 	return false
+}
+
+// directoryAccountDisabled reports whether a directory-backed user's AD account
+// is disabled, expired, or no longer exists. SimpleAuth's own user.Disabled flag
+// is only set by an admin here; this mirrors the account state in AD itself, so
+// a user disabled in AD loses access even when they still hold a valid Kerberos
+// ticket (AD only stops issuing NEW tickets), an SSO session cookie, a refresh
+// token, or a local shadow password (SA-7).
+//
+// An explicit "disabled" or "not found" answer from the directory always denies.
+// When LDAP is configured but unreachable, the admin's directory_outage_policy
+// decides (see directoryOutageDenies). When LDAP is not configured at all there
+// is nothing to check against and the user is allowed.
+func (h *Handler) directoryAccountDisabled(user *store.User) bool {
+	if !h.isDirectoryBacked(user) {
+		return false
+	}
+	ldapCfg, err := h.getLDAPConfigDecrypted()
+	if err != nil {
+		return false
+	}
+	cfg := ldapConfigFromStore(ldapCfg)
+
+	name := user.SAMAccountName
+	if name == "" {
+		mappings, _ := h.store.GetMappingsForUser(user.GUID)
+		for _, m := range mappings {
+			if m.Provider == "ldap" {
+				name = m.ExternalID
+				break
+			}
+		}
+	}
+	if name == "" {
+		return false
+	}
+	attr := cfg.UsernameAttr
+	if attr == "" {
+		attr = "sAMAccountName"
+	}
+	result, err := auth.LDAPSearchUser(cfg, attr, name)
+	if err != nil {
+		if errors.Is(err, auth.ErrLDAPUserNotFound) {
+			log.Printf("[auth] Directory account not found user=%q guid=%s — denying", name, user.GUID)
+			return true
+		}
+		return h.directoryOutageDenies(user, name, err)
+	}
+	if result.Disabled {
+		log.Printf("[auth] Directory account disabled user=%q guid=%s — denying", name, user.GUID)
+		return true
+	}
+	h.recordDirectoryCheck(user.GUID)
+	return false
+}
+
+// directoryOutageDenies applies the admin's AD-outage policy when the account
+// status can't be read because LDAP is unreachable.
+func (h *Handler) directoryOutageDenies(user *store.User, name string, lookupErr error) bool {
+	policy, grace := h.getDirectoryOutagePolicy()
+	switch policy {
+	case directoryOutageAllow:
+		log.Printf("[auth] Directory status check failed user=%q guid=%s err=%v — allowing (policy=allow)", name, user.GUID, lookupErr)
+		return false
+	case directoryOutageBlock:
+		log.Printf("[auth] Directory status check failed user=%q guid=%s err=%v — denying (policy=block)", name, user.GUID, lookupErr)
+		return true
+	}
+	last, ok := h.lastDirectoryCheck(user.GUID)
+	if ok && time.Since(last) < grace {
+		log.Printf("[auth] Directory status check failed user=%q guid=%s err=%v — allowing (policy=grace, last confirmed %s ago)", name, user.GUID, lookupErr, time.Since(last).Round(time.Second))
+		return false
+	}
+	log.Printf("[auth] Directory status check failed user=%q guid=%s err=%v — denying (policy=grace, not confirmed within %s)", name, user.GUID, lookupErr, grace)
+	return true
+}
+
+// dirCheckPersistEvery throttles store writes of the last-successful-check
+// timestamp; the grace window is hours, so minute-level precision is plenty.
+const dirCheckPersistEvery = 5 * time.Minute
+
+// dirCheckKeyPrefix namespaces the per-user last-successful-check timestamp in
+// the config key-value store.
+const dirCheckKeyPrefix = "dircheck:"
+
+func (h *Handler) recordDirectoryCheck(guid string) {
+	now := time.Now().UTC()
+	if v, ok := h.dirChecked.Load(guid); ok && now.Sub(v.(time.Time)) < dirCheckPersistEvery {
+		return
+	}
+	h.dirChecked.Store(guid, now)
+	// Stored separately from the user record so this write can never clobber a
+	// concurrent admin change to the user (e.g. setting Disabled).
+	h.store.SetConfigValue(dirCheckKeyPrefix+guid, []byte(now.Format(time.RFC3339)))
+}
+
+func (h *Handler) lastDirectoryCheck(guid string) (time.Time, bool) {
+	if v, ok := h.dirChecked.Load(guid); ok {
+		return v.(time.Time), true
+	}
+	b, err := h.store.GetConfigValue(dirCheckKeyPrefix + guid)
+	if err != nil || len(b) == 0 {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339, string(b))
+	if err != nil {
+		return time.Time{}, false
+	}
+	h.dirChecked.Store(guid, t)
+	return t, true
 }
 
 // resolvePreferredUsername finds the username for a user from identity mappings.
@@ -569,7 +687,7 @@ func (h *Handler) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "user not found", http.StatusUnauthorized)
 		return
 	}
-	if user.Disabled {
+	if user.Disabled || h.directoryAccountDisabled(user) {
 		jsonError(w, "account disabled", http.StatusForbidden)
 		return
 	}
@@ -609,10 +727,13 @@ func (h *Handler) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		PreferredUsername: h.resolvePreferredUsername(user),
 	}
 	newClaims.Subject = user.GUID
-	// Refresh stays bound to the same app (v2): re-stamp the original audience.
-	if storedRT.Audience != "" {
-		newClaims.Audience = []string{storedRT.Audience}
-	}
+	// Refresh stays bound to the same app (v2), but the audience is re-read from
+	// the app's current config rather than copied forward from the stored token:
+	// otherwise an admin correcting app.Audience would leave every existing
+	// refresh family minting tokens with the stale aud indefinitely. Matches the
+	// OIDC refresh path (buildOIDCAccessClaims).
+	audience := appAudience(app)
+	newClaims.Audience = []string{audience}
 
 	accessToken, err := h.jwt.IssueAccessToken(newClaims, h.cfg.AccessTTL)
 	if err != nil {
@@ -633,7 +754,7 @@ func (h *Handler) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt: time.Now().UTC().Add(h.cfg.RefreshTTL),
 		CreatedAt: time.Now().UTC(),
 		AppID:     storedRT.AppID,
-		Audience:  storedRT.Audience,
+		Audience:  audience,
 	}
 	if err := h.store.SaveRefreshToken(newRT); err != nil {
 		jsonError(w, "refresh token generation failed", http.StatusInternalServerError)
@@ -1042,7 +1163,8 @@ func (h *Handler) handleNegotiate(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "user not found", http.StatusUnauthorized)
 		return
 	}
-	if user.Disabled {
+	// A valid Kerberos ticket outlives an AD disable, so check AD itself too.
+	if user.Disabled || h.directoryAccountDisabled(user) {
 		jsonError(w, "account disabled", http.StatusForbidden)
 		return
 	}
@@ -1306,6 +1428,10 @@ func (h *Handler) handleSSOLogin(w http.ResponseWriter, r *http.Request) {
 	userGUID, ldapGroups, err := h.resolveKerberosUser(username)
 	if err != nil {
 		log.Printf("[sso] User resolution failed for %q: %v", username, err)
+		if errors.Is(err, auth.ErrLDAPAccountDisabled) {
+			h.redirectToLoginError(w, r, redirectURI, "Account disabled")
+			return
+		}
 		h.redirectToLoginError(w, r, redirectURI, "User not found in directory")
 		return
 	}
@@ -1440,8 +1566,18 @@ func (h *Handler) resolveKerberosUser(username string) (string, []string, error)
 				var groups []string
 				result, err := auth.LDAPSearchUser(cfg, "sAMAccountName", username)
 				if err == nil {
+					// A still-valid Kerberos ticket is not proof the account is
+					// active: AD only stops issuing new tickets on disable.
+					if result.Disabled {
+						return "", nil, auth.ErrLDAPAccountDisabled
+					}
 					groups = result.Groups
 					h.syncUserFromLDAP(user, result) // self-heals SAMAccountName + mappings
+					h.recordDirectoryCheck(user.GUID)
+				} else if h.directoryAccountDisabled(user) {
+					// The cname may be a UPN that doesn't match sAMAccountName;
+					// re-check by the stored authoritative name.
+					return "", nil, auth.ErrLDAPAccountDisabled
 				}
 				return user.GUID, groups, nil
 			}
@@ -1452,6 +1588,9 @@ func (h *Handler) resolveKerberosUser(username string) (string, []string, error)
 	result, err := auth.LDAPSearchUser(cfg, "sAMAccountName", username)
 	if err != nil {
 		return "", nil, fmt.Errorf("user %q not found in LDAP: %v", username, err)
+	}
+	if result.Disabled {
+		return "", nil, auth.ErrLDAPAccountDisabled
 	}
 
 	// Double-check: ensure no existing user with the authoritative sAMAccountName
@@ -1490,6 +1629,7 @@ func (h *Handler) resolveKerberosUser(username string) (string, []string, error)
 		h.store.SetIdentityMapping("ldap", username, newUser.GUID)
 		h.store.SetIdentityMapping("local", username, newUser.GUID)
 	}
+	h.recordDirectoryCheck(newUser.GUID)
 	log.Printf("[sso] JIT provisioned user guid=%s cname=%q sam=%q from LDAP", newUser.GUID, username, samName)
 	return newUser.GUID, result.Groups, nil
 }

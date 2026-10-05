@@ -2,11 +2,22 @@ package auth
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-ldap/ldap/v3"
 )
+
+// ErrLDAPUserNotFound is returned (wrapped) when a directory search matches no
+// entry, so callers can tell "the account is gone" apart from "LDAP is down".
+var ErrLDAPUserNotFound = errors.New("ldap user not found")
+
+// ErrLDAPAccountDisabled is returned when the directory marks the account as
+// disabled or expired (AD userAccountControl / accountExpires).
+var ErrLDAPAccountDisabled = errors.New("directory account disabled")
 
 type LDAPConfig struct {
 	URL             string
@@ -35,6 +46,10 @@ type LDAPResult struct {
 	Company     string
 	JobTitle    string
 	Groups      []string
+	// Disabled is true when AD reports the account as disabled
+	// (userAccountControl ACCOUNTDISABLE) or past its accountExpires date.
+	// Always false for directories that expose neither attribute.
+	Disabled bool
 }
 
 func LDAPConnect(cfg *LDAPConfig) (*ldap.Conn, error) {
@@ -96,7 +111,7 @@ func LDAPSearchUser(cfg *LDAPConfig, field, value string) (*LDAPResult, error) {
 		return nil, fmt.Errorf("ldap search: %w", err)
 	}
 	if len(sr.Entries) == 0 {
-		return nil, fmt.Errorf("user not found: %s=%s", field, value)
+		return nil, fmt.Errorf("%w: %s=%s", ErrLDAPUserNotFound, field, value)
 	}
 
 	entry := sr.Entries[0]
@@ -196,7 +211,7 @@ func LDAPAuthenticate(cfg *LDAPConfig, username, password string) (*LDAPResult, 
 		return nil, fmt.Errorf("ldap search: %w", err)
 	}
 	if len(sr.Entries) == 0 {
-		return nil, fmt.Errorf("user not found: %s", username)
+		return nil, fmt.Errorf("%w: %s", ErrLDAPUserNotFound, username)
 	}
 
 	entry := sr.Entries[0]
@@ -206,7 +221,13 @@ func LDAPAuthenticate(cfg *LDAPConfig, username, password string) (*LDAPResult, 
 		return nil, fmt.Errorf("authentication failed")
 	}
 
-	return entryToResult(entry, cfg), nil
+	// AD normally refuses the bind for a disabled/expired account, but don't rely
+	// on it: check the account state explicitly.
+	result := entryToResult(entry, cfg)
+	if result.Disabled {
+		return nil, ErrLDAPAccountDisabled
+	}
+	return result, nil
 }
 
 // LDAPTestConnection tests connectivity and bind with a service account.
@@ -228,7 +249,7 @@ func ldapAttrs(cfg *LDAPConfig) []string {
 	if usernameAttr == "" {
 		usernameAttr = "sAMAccountName"
 	}
-	attrs := []string{"dn", usernameAttr}
+	attrs := []string{"dn", usernameAttr, "userAccountControl", "accountExpires"}
 	for _, a := range []string{cfg.DisplayNameAttr, cfg.EmailAttr, cfg.DepartmentAttr, cfg.CompanyAttr, cfg.JobTitleAttr, cfg.GroupsAttr} {
 		if a != "" {
 			attrs = append(attrs, a)
@@ -245,6 +266,7 @@ func entryToResult(entry *ldap.Entry, cfg *LDAPConfig) *LDAPResult {
 	result := &LDAPResult{
 		DN:       entry.DN,
 		Username: entry.GetAttributeValue(usernameAttr),
+		Disabled: adAccountDisabled(entry.GetAttributeValue("userAccountControl"), entry.GetAttributeValue("accountExpires"), time.Now()),
 	}
 	if cfg.DisplayNameAttr != "" {
 		result.DisplayName = entry.GetAttributeValue(cfg.DisplayNameAttr)
@@ -278,4 +300,29 @@ func entryToResult(entry *ldap.Entry, cfg *LDAPConfig) *LDAPResult {
 		}
 	}
 	return result
+}
+
+// adAccountDisabled interprets AD's account-state attributes. Empty values
+// (non-AD directories) mean "not disabled".
+//
+//   - userAccountControl: bit 0x2 is ACCOUNTDISABLE.
+//   - accountExpires: Windows FILETIME (100ns ticks since 1601-01-01 UTC);
+//     0 and 0x7FFFFFFFFFFFFFFF both mean "never expires".
+func adAccountDisabled(userAccountControl, accountExpires string, now time.Time) bool {
+	if userAccountControl != "" {
+		if uac, err := strconv.ParseInt(userAccountControl, 10, 64); err == nil && uac&0x2 != 0 {
+			return true
+		}
+	}
+	if accountExpires != "" {
+		ft, err := strconv.ParseInt(accountExpires, 10, 64)
+		if err == nil && ft != 0 && ft != 0x7FFFFFFFFFFFFFFF {
+			const epochDiff = 11644473600 // seconds between 1601-01-01 and 1970-01-01
+			expires := time.Unix(ft/1e7-epochDiff, (ft%1e7)*100)
+			if !now.Before(expires) {
+				return true
+			}
+		}
+	}
+	return false
 }

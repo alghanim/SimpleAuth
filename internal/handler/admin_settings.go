@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -37,7 +39,12 @@ func (h *Handler) initRuntimeSettings() {
 		// actually runs; persist the one-time upgrade.
 		oldMax, oldWin := existing.RateLimitMax, existing.RateLimitWindowS
 		h.normalizeRateLimit(existing)
-		if existing.RateLimitMax != oldMax || existing.RateLimitWindowS != oldWin {
+		oldPolicy, oldGrace := existing.DirectoryOutagePolicy, existing.DirectoryOutageGraceHours
+		if normalizeDirectoryOutage(existing) != nil {
+			existing.DirectoryOutagePolicy = directoryOutageGrace
+		}
+		if existing.RateLimitMax != oldMax || existing.RateLimitWindowS != oldWin ||
+			existing.DirectoryOutagePolicy != oldPolicy || existing.DirectoryOutageGraceHours != oldGrace {
 			h.store.SaveRuntimeSettings(existing)
 		}
 		h.runtimeSettings.set(existing)
@@ -47,26 +54,32 @@ func (h *Handler) initRuntimeSettings() {
 
 	// First run — seed from config
 	rs := &store.RuntimeSettings{
-		DeploymentName:           h.cfg.DeploymentName,
-		RedirectURIs:             h.cfg.RedirectURIs,
-		CORSOrigins:              h.cfg.CORSOrigins,
-		PasswordMinLength:        h.cfg.PasswordMinLength,
-		PasswordRequireUppercase: h.cfg.PasswordRequireUppercase,
-		PasswordRequireLowercase: h.cfg.PasswordRequireLowercase,
-		PasswordRequireDigit:     h.cfg.PasswordRequireDigit,
-		PasswordRequireSpecial:   h.cfg.PasswordRequireSpecial,
-		PasswordHistoryCount:     h.cfg.PasswordHistoryCount,
-		AccountLockoutThreshold:  h.cfg.AccountLockoutThreshold,
-		AccountLockoutDurationS:  int(h.cfg.AccountLockoutDuration.Seconds()),
-		DefaultRoles:             h.cfg.DefaultRoles,
-		RateLimitMax:             h.cfg.RateLimitMax,
-		RateLimitWindowS:         int(h.cfg.RateLimitWindow.Seconds()),
-		AuditRetentionDays:       int(h.cfg.AuditRetention.Hours() / 24),
-		AutoSSO:                  h.cfg.AutoSSO,
-		AutoSSODelay:             h.cfg.AutoSSODelay,
-		EnableSessionSSO:         h.cfg.EnableSessionSSO,
-		SessionSSOIdleHours:      int(h.cfg.SessionSSOIdleTTL.Hours()),
-		SessionSSOMaxHours:       int(h.cfg.SessionSSOMaxTTL.Hours()),
+		DeploymentName:            h.cfg.DeploymentName,
+		RedirectURIs:              h.cfg.RedirectURIs,
+		CORSOrigins:               h.cfg.CORSOrigins,
+		PasswordMinLength:         h.cfg.PasswordMinLength,
+		PasswordRequireUppercase:  h.cfg.PasswordRequireUppercase,
+		PasswordRequireLowercase:  h.cfg.PasswordRequireLowercase,
+		PasswordRequireDigit:      h.cfg.PasswordRequireDigit,
+		PasswordRequireSpecial:    h.cfg.PasswordRequireSpecial,
+		PasswordHistoryCount:      h.cfg.PasswordHistoryCount,
+		AccountLockoutThreshold:   h.cfg.AccountLockoutThreshold,
+		AccountLockoutDurationS:   int(h.cfg.AccountLockoutDuration.Seconds()),
+		DefaultRoles:              h.cfg.DefaultRoles,
+		RateLimitMax:              h.cfg.RateLimitMax,
+		RateLimitWindowS:          int(h.cfg.RateLimitWindow.Seconds()),
+		AuditRetentionDays:        int(h.cfg.AuditRetention.Hours() / 24),
+		AutoSSO:                   h.cfg.AutoSSO,
+		AutoSSODelay:              h.cfg.AutoSSODelay,
+		EnableSessionSSO:          h.cfg.EnableSessionSSO,
+		SessionSSOIdleHours:       int(h.cfg.SessionSSOIdleTTL.Hours()),
+		SessionSSOMaxHours:        int(h.cfg.SessionSSOMaxTTL.Hours()),
+		DirectoryOutagePolicy:     h.cfg.DirectoryOutagePolicy,
+		DirectoryOutageGraceHours: int(h.cfg.DirectoryOutageGrace.Hours()),
+	}
+	if normalizeDirectoryOutage(rs) != nil {
+		log.Printf("[config] invalid directory_outage_policy %q — using %q", rs.DirectoryOutagePolicy, directoryOutageGrace)
+		rs.DirectoryOutagePolicy = directoryOutageGrace
 	}
 	h.store.SaveRuntimeSettings(rs)
 	h.runtimeSettings.set(rs)
@@ -84,6 +97,50 @@ const (
 	maxRateLimitMax         = 1_000_000_000
 	maxRateLimitWindowS     = 86_400 // 1 day
 )
+
+// AD outage policies: what happens to directory users when the AD
+// account-status check can't reach LDAP (see directoryAccountDisabled).
+const (
+	directoryOutageGrace = "grace" // allow only users confirmed active in AD within the grace window (default)
+	directoryOutageBlock = "block" // deny every directory user until AD is reachable
+	directoryOutageAllow = "allow" // allow everyone — least secure, not recommended
+
+	defaultDirectoryOutageGraceHours = 10  // AD's default Kerberos ticket lifetime
+	maxDirectoryOutageGraceHours     = 168 // 7 days
+)
+
+// normalizeDirectoryOutage fills defaults for the AD outage settings and
+// rejects unknown policies. Empty policy (legacy documents, or a client that
+// omits the field) means grace.
+func normalizeDirectoryOutage(rs *store.RuntimeSettings) error {
+	rs.DirectoryOutagePolicy = strings.ToLower(strings.TrimSpace(rs.DirectoryOutagePolicy))
+	switch rs.DirectoryOutagePolicy {
+	case "":
+		rs.DirectoryOutagePolicy = directoryOutageGrace
+	case directoryOutageGrace, directoryOutageBlock, directoryOutageAllow:
+	default:
+		return fmt.Errorf("directory_outage_policy must be one of: grace, block, allow")
+	}
+	if rs.DirectoryOutageGraceHours < 1 {
+		rs.DirectoryOutageGraceHours = defaultDirectoryOutageGraceHours
+	}
+	if rs.DirectoryOutageGraceHours > maxDirectoryOutageGraceHours {
+		rs.DirectoryOutageGraceHours = maxDirectoryOutageGraceHours
+	}
+	return nil
+}
+
+func (h *Handler) getDirectoryOutagePolicy() (string, time.Duration) {
+	rs := h.runtimeSettings.get()
+	if rs == nil {
+		rs = &store.RuntimeSettings{DirectoryOutagePolicy: h.cfg.DirectoryOutagePolicy, DirectoryOutageGraceHours: int(h.cfg.DirectoryOutageGrace.Hours())}
+	}
+	c := *rs
+	if normalizeDirectoryOutage(&c) != nil {
+		c.DirectoryOutagePolicy = directoryOutageGrace
+	}
+	return c.DirectoryOutagePolicy, time.Duration(c.DirectoryOutageGraceHours) * time.Hour
+}
 
 // normalizeRateLimit clamps the rate-limit numbers into sane bounds (F25:
 // omitted/zeroed values fall back, absurd values are capped). Turning the
@@ -238,6 +295,10 @@ func (h *Handler) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.normalizeRateLimit(&rs)
+	if err := normalizeDirectoryOutage(&rs); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	// Serialize version-check → save → cache-set → limiter-apply: concurrent
 	// PUTs must not leave the store, the cache, and the live limiter with
@@ -273,6 +334,15 @@ func (h *Handler) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		h.audit("rate_limit_changed", "admin", getClientIP(r), map[string]interface{}{
 			"disabled": rs.RateLimitDisabled, "max": rs.RateLimitMax, "window_s": rs.RateLimitWindowS,
 			"old_disabled": old.RateLimitDisabled, "old_max": old.RateLimitMax, "old_window_s": old.RateLimitWindowS,
+		})
+	}
+
+	// The AD outage policy decides whether disabled AD users can get in while
+	// LDAP is down — a security posture change, so audit it explicitly.
+	if old != nil && (old.DirectoryOutagePolicy != rs.DirectoryOutagePolicy || old.DirectoryOutageGraceHours != rs.DirectoryOutageGraceHours) {
+		h.audit("directory_outage_policy_changed", "admin", getClientIP(r), map[string]interface{}{
+			"policy": rs.DirectoryOutagePolicy, "grace_hours": rs.DirectoryOutageGraceHours,
+			"old_policy": old.DirectoryOutagePolicy, "old_grace_hours": old.DirectoryOutageGraceHours,
 		})
 	}
 

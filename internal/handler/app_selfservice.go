@@ -279,6 +279,16 @@ func (h *Handler) handleCreateLocalUser(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, "username already exists for this app", http.StatusConflict)
 		return
 	}
+	// Load the authz record before creating anything so a store failure can't
+	// leave a half-provisioned user behind.
+	var authz *store.AppAuthz
+	if len(req.Roles) > 0 {
+		authz, err = h.store.GetAppAuthz(appID)
+		if err != nil || authz == nil {
+			jsonError(w, "failed to load app authorization", http.StatusInternalServerError)
+			return
+		}
+	}
 	hash, err := auth.HashPassword(req.Password)
 	if err != nil {
 		jsonError(w, "failed to hash password", http.StatusInternalServerError)
@@ -295,14 +305,22 @@ func (h *Handler) handleCreateLocalUser(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, "failed to create user", http.StatusInternalServerError)
 		return
 	}
-	h.store.SetIdentityMapping(mapKey, req.Username, u.GUID)
-	if len(req.Roles) > 0 {
-		authz, _ := h.store.GetAppAuthz(appID)
+	if err := h.store.SetIdentityMapping(mapKey, req.Username, u.GUID); err != nil {
+		h.store.DeleteUser(u.GUID)
+		jsonError(w, "failed to create user", http.StatusInternalServerError)
+		return
+	}
+	if authz != nil {
 		if authz.UserAssignments == nil {
 			authz.UserAssignments = map[string][]string{}
 		}
 		authz.UserAssignments[req.Username] = req.Roles
-		h.store.SaveAppAuthz(authz)
+		if err := h.store.SaveAppAuthz(authz); err != nil {
+			h.store.DeleteIdentityMapping(mapKey, req.Username)
+			h.store.DeleteUser(u.GUID)
+			jsonError(w, "failed to assign roles", http.StatusInternalServerError)
+			return
+		}
 	}
 	h.audit("app_local_user_created", h.appActor(r), getClientIP(r), map[string]interface{}{"app_id": appID, "username": req.Username, "actor_kind": h.appActorKind(r)})
 	jsonResp(w, map[string]interface{}{"guid": u.GUID, "username": req.Username, "owner_app_id": appID}, http.StatusCreated)

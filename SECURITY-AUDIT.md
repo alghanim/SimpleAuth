@@ -113,6 +113,10 @@ source of truth for what is currently open vs. fixed.
 | M37 | LDAP group-CN parsing only strips uppercase `CN=` → broken role mapping | MEDIUM | FIXED | 2026-06-01 (Pass 3) |
 | M38 | Bolt splits the composite mapping key on the first `:` → `applocal:<appID>` providers corrupted; diverges from Postgres and breaks app-local login after a backend migration | MEDIUM | FIXED | 2026-08-08 (Pass 4) |
 | M39 | Kerberos/LDAP diagnostic pages reflect SPNEGO parse errors and AD attributes into hand-built HTML; three sites had NO escaping | MEDIUM | FIXED | 2026-08-08 (Pass 4) |
+| H17 | Users disabled / expired / deleted in AD keep access: Kerberos SSO accepts still-valid tickets, and refresh + SSO cookie never consult AD | HIGH | FIXED | 2026-10-05 (Pass 5, branch `fix/code-review-findings`) |
+| M40 | v1 `/api/auth/refresh` copies the stored `aud` forward forever → an admin audience correction never reaches existing sessions | MEDIUM | FIXED | 2026-10-05 (Pass 5, branch `fix/code-review-findings`) |
+| L23 | SSO cookie path moved from `/` to `BasePath` without expiring the old `Path=/` cookie → legacy cookie survives logout and silently signs the user back in | LOW | FIXED | 2026-10-05 (Pass 5, branch `fix/code-review-findings`) |
+| L24 | `handleCreateLocalUser` ignores `SetIdentityMapping` / `GetAppAuthz` errors → nil-deref panic, half-provisioned user | LOW | FIXED | 2026-10-05 (Pass 5, branch `fix/code-review-findings`) |
 | L6 | `ValidateToken` did not require `exp` (missing-`exp` token validated) | LOW | FIXED | 2026-06-01 (Pass 3) |
 | L7 | PKCE accepted `plain`/empty downgrade though discovery advertises only S256 | LOW | FIXED | 2026-06-01 (Pass 3) |
 | L8 | Impersonation issued a token for a disabled / access-revoked target | LOW | FIXED | 2026-06-01 (Pass 3) |
@@ -1313,3 +1317,85 @@ page renders a real base path with no placeholder left behind; and the wait page
 still returns **401**, which the SPNEGO handshake depends on — the conversion moved
 `WriteHeader` into a shared helper, exactly the kind of thing a refactor drops
 silently.
+
+---
+
+## Audit Pass 5 — 2026-09-29 — Claude Opus 5.5 (`claude-opus-5-5`) + operator report
+
+Scope: code review of `103cefd..10495ad` (the v2.x range), plus one issue reported
+by the operator from production ("if the AD user is disabled, the user can still
+sign in"). Fixes on branch `fix/code-review-findings`.
+
+### H17 — AD account state never enforced (disabled users keep access)
+
+**Severity:** HIGH. Reported from production.
+
+Nothing read AD account state (`userAccountControl`, `accountExpires`); the SA-7
+section already recorded "`grep -rn userAccountControl` returns zero hits". The
+only gate was SimpleAuth's own `user.Disabled`, which an admin sets by hand.
+Consequences for a user disabled in AD:
+
+- **Kerberos SSO kept working.** AD stops issuing *new* tickets on disable, but an
+  already-issued service ticket stays valid (default 10h). `resolveKerberosUser`
+  accepted the ticket for a known user and ignored the LDAP search result, even
+  its error and not-found cases.
+- **Refresh tokens kept minting access tokens** for up to `refresh_ttl` (30 days),
+  on both `/api/auth/refresh` and OIDC `refresh_token`.
+- **SSO session cookie kept auto-signing-in** (`resolveSessionCookie`) for up to
+  `session_sso_max_ttl`.
+- **A local shadow hash kept working** (the residual SA-7 exposure).
+
+LDAP password login was already safe only because AD refuses the bind.
+
+**Fix.**
+- `auth.LDAPResult.Disabled`: always request `userAccountControl` and `accountExpires`.
+  Disabled when bit `0x2` is set, or `accountExpires` is set and in the past.
+  `LDAPAuthenticate` rejects a disabled result explicitly, without relying on the
+  bind failing. `ErrLDAPUserNotFound` is a sentinel, so "deleted from AD" can be
+  told apart from "LDAP down".
+- `handler.directoryAccountDisabled(user)` runs for directory-backed users only
+  (`isDirectoryBacked`) in: both Kerberos endpoints (existing-user and JIT
+  branches), `authenticateUser` (local-hash success on a directory identity), both
+  refresh paths, and `resolveSessionCookie`. "Not found" denies.
+- **AD outage policy** (runtime setting `directory_outage_policy`, admin UI →
+  Settings → AD Outage Behavior): `grace` (default: allow only users confirmed
+  active within `directory_outage_grace_hours`, default 10 = AD ticket lifetime),
+  `block`, `allow`. The last-confirmed time is persisted per user as config value
+  `dircheck:<guid>`. It is deliberately **not** stored on the user row, so this
+  write can never clobber a concurrent admin change such as setting `Disabled`.
+  Policy changes are audited (`directory_outage_policy_changed`).
+
+**Residual.** A user linked *only* through a `kerberos` mapping on
+`/api/auth/negotiate` (no `SAMAccountName`, no `ldap` mapping) has no reliable AD
+name to look up and is not checked. Deriving one from the principal risks
+locking out real users. Any `/login/sso` login backfills `SAMAccountName`, after
+which the user is covered. Under `grace`, a user disabled at the start of an AD
+outage keeps access for up to the grace window. That is the documented,
+admin-chosen trade-off.
+
+**Tests.** `internal/auth/ldap_test.go` (attribute parsing).
+`internal/handler/directory_outage_test.go` simulates an outage with LDAP pointed
+at a closed port and covers each policy, the grace boundary, restart persistence,
+local-user exemption, and settings validation.
+
+### M40 — refresh copies a stale audience forward
+
+`handleRefresh` stamped `storedRT.Audience` and copied it into the next refresh
+row, so a corrected `app.Audience` (for example after an H15-style re-stamp)
+never reached existing v1 refresh families. The OIDC path already re-read it.
+**Fix:** use `appAudience(app)` of the re-resolved app, and persist that.
+
+### L23 — legacy `Path=/` SSO cookie survives logout
+
+After the cookie moved to `BasePath`, a browser still carrying the old `Path=/`
+cookie sends both. Logout deleted only the first session and expired only the
+new path. **Fix:** `clearSessionCookie` also expires `Path=/` when a base path
+is set, and `deleteCurrentSession` deletes the session behind every cookie of
+that name.
+
+### L24 — app-local user creation ignores store errors
+
+`GetAppAuthz` returns `nil` on a store error, and the handler dereferenced it
+after the user was already created. The `SetIdentityMapping` error was also
+dropped. **Fix:** load authz before creating anything; on a mapping or authz-save
+failure, roll back the mapping and user and return 500.
